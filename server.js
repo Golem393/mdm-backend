@@ -34,8 +34,8 @@ app.put('/api/move-member-to-official', async (req, res) => {
         const mdmResponse = await axios.put(
             `https://mdm.manageengine.com/api/v1/mdm/groups/${process.env.KIOSK_GROUP_ID}/targetgroups`,
             {
-                member_ids: [Number(memberId)],
-                target_group_ids: [Number(process.env.OFFICIAL_GROUP_ID)]
+                member_ids: [memberId],
+                target_group_ids: [process.env.OFFICIAL_GROUP_ID]
             },
             {
                 headers: {
@@ -85,8 +85,8 @@ app.put('/api/move-member-to-kiosk', async (req, res) => {
         const mdmResponse = await axios.put(
             `https://mdm.manageengine.com/api/v1/mdm/groups/${process.env.OFFICIAL_GROUP_ID}/targetgroups`,
             {
-                member_ids: [Number(memberId)],
-                target_group_ids: [Number(process.env.KIOSK_GROUP_ID)]
+                member_ids: [memberId],
+                target_group_ids: [process.env.KIOSK_GROUP_ID]
             },
             {
                 headers: {
