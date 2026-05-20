@@ -8,7 +8,10 @@ app.use(express.json());
 app.delete('/api/remove-member', async (req, res) => {
     // ADD YOUR APP'S AUTHENTICATION CHECK HERE FIRST!
     // Do not leave this open to the public internet without checking a header/token from your APK.
-    
+    const memberId = req.body.memberId;
+    if (!memberId) {
+        return res.status(400).send("Missing memberId");
+    }
     try {
         // Step 1: Generate a fresh Access Token using the permanent Refresh Token
         const tokenResponse = await axios.post('https://accounts.zoho.com/oauth/v2/token', null, {
@@ -29,7 +32,7 @@ app.delete('/api/remove-member', async (req, res) => {
 
         // Step 2: Make the actual ManageEngine API call with the fresh token
         const mdmResponse = await axios.delete(
-            'https://www.mdm.manageengine.com/api/v1/mdm/groups/99731238129/members/987000000654321', 
+            `https://mdm.manageengine.com/api/v1/mdm/groups/${process.env.KIOSK_GROUP_ID}/members/${memberId}`,
             {
                 headers: {
                     'Authorization': `Zoho-oauthtoken ${newAccessToken}`
