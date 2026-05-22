@@ -106,6 +106,50 @@ app.put('/api/move-member-to-kiosk', async (req, res) => {
 });
 
 
+app.get('/api/kiosk-devices', async (req, res) => {
+    // ADD YOUR APP'S AUTHENTICATION CHECK HERE FIRST!
+    try {
+        // Step 1: Generate a fresh Access Token using the permanent Refresh Token
+        const tokenResponse = await axios.post('https://accounts.zoho.com/oauth/v2/token', null, {
+            params: {
+                refresh_token: process.env.ZOHO_REFRESH_TOKEN,
+                client_id: process.env.ZOHO_CLIENT_ID,
+                client_secret: process.env.ZOHO_CLIENT_SECRET,
+                grant_type: 'refresh_token'
+            }
+        });
+
+        const newAccessToken = tokenResponse.data.access_token;
+
+        if (!newAccessToken) {
+            console.error("Token Response:", tokenResponse.data);
+            return res.status(500).send("Failed to get fresh access token from Zoho.");
+        }
+
+        // Step 2: Get all devices from the Kiosk Group
+        const mdmResponse = await axios.get(
+            'https://mdm.manageengine.com/api/v1/mdm/devices',
+            {
+                params: {
+                    group_id: process.env.KIOSK_GROUP_ID,
+                    exclude_removed: true // optional, but recommended to keep list clean
+                },
+                headers: {
+                    'Authorization': `Zoho-oauthtoken ${newAccessToken}`,
+                    'Accept': 'application/json'
+                }
+            }
+        );
+        
+        res.status(200).json(mdmResponse.data);
+
+    } catch (error) {
+        console.error("API Error:", error.response?.data || error.message);
+        res.status(error.response?.status || 500).send("API Call Failed");
+    }
+});
+
+
 // Start the server
 app.listen(process.env.PORT || 3000, () => {
     console.log("Server running...");
