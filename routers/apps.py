@@ -1,10 +1,16 @@
 import os
 import csv
+import asyncio
+import time
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from google_play_scraper import app as get_app_info
 
 router = APIRouter()
+
+# Rate limiting for Google Play requests
+play_store_lock = asyncio.Lock()
+last_request_time = 0.0
 
 # Memory cache for popular apps to avoid reading the file on every request
 popular_apps_cache = None
@@ -55,9 +61,23 @@ async def get_app_category(request: AppCategoryRequest):
     if not package_name:
         raise HTTPException(status_code=400, detail="Missing packageName")
 
+    global last_request_time
     try:
-        # Fetch data from Google Play
-        app_data = get_app_info(package_name)
+        # Acquire lock to ensure only one request to Google Play Store at a time
+        async with play_store_lock:
+            now = time.time()
+            elapsed = now - last_request_time
+            # If less than 0.25s has passed since the last request, sleep for the difference
+            if elapsed < 0.25:
+                await asyncio.sleep(0.25 - elapsed)
+
+            try:
+                # Fetch data from Google Play
+                app_data = get_app_info(package_name)
+            finally:
+                # Update the last request time regardless of success or failure
+                last_request_time = time.time()
+
         category = app_data.get('genre', 'Unknown')
         return {"packageName": package_name, "category": category}
 

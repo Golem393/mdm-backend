@@ -24,8 +24,8 @@ from routers import devices
 from routers import apps
 
 # Register routes to the root (/) requiring the API Key
-app.include_router(devices.router, dependencies=[Depends(get_api_key)])
-app.include_router(apps.router, dependencies=[Depends(get_api_key)])
+app.include_router(devices.router, prefix="/api", dependencies=[Depends(get_api_key)])
+app.include_router(apps.router, prefix="/api", dependencies=[Depends(get_api_key)])
 
 if __name__ == "__main__":
     import uvicorn
