@@ -78,7 +78,7 @@ async def get_app_category(request: AppCategoryRequest):
                 # Update the last request time regardless of success or failure
                 last_request_time = time.time()
 
-        category = app_data.get('genre', 'Unknown')
+        category = app_data.get('genreId', 'Unknown')
         return {"packageName": package_name, "category": category}
 
     except Exception as e:
