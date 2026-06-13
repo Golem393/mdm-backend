@@ -8,11 +8,8 @@ from google_play_scraper import app as get_app_info
 
 router = APIRouter()
 
-# Rate limiting for Google Play requests
 play_store_lock = asyncio.Lock()
 last_request_time = 0.0
-
-# Memory cache for popular apps to avoid reading the file on every request
 popular_apps_cache = None
 
 def parse_app_categories():
@@ -63,19 +60,17 @@ async def get_app_category(request: AppCategoryRequest):
 
     global last_request_time
     try:
-        # Acquire lock to ensure only one request to Google Play Store at a time
         async with play_store_lock:
             now = time.time()
             elapsed = now - last_request_time
-            # If less than 0.25s has passed since the last request, sleep for the difference
-            if elapsed < 0.25:
-                await asyncio.sleep(0.25 - elapsed)
+            if elapsed < 0.5:
+                await asyncio.sleep(0.5 - elapsed)
 
             try:
-                # Fetch data from Google Play
-                app_data = get_app_info(package_name)
+                # MUST run the synchronous scraper in a thread executor
+                loop = asyncio.get_running_loop()
+                app_data = await loop.run_in_executor(None, get_app_info, package_name)
             finally:
-                # Update the last request time regardless of success or failure
                 last_request_time = time.time()
 
         category = app_data.get('genreId', 'Unknown')
@@ -83,5 +78,4 @@ async def get_app_category(request: AppCategoryRequest):
 
     except Exception as e:
         print(f"Error in /app-category for {package_name}: {e}")
-        # If app is not found or error occurs, return Unknown so app doesn't crash
         return {"packageName": package_name, "category": 'Unknown'}
