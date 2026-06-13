@@ -7,7 +7,42 @@ from fastapi import APIRouter, HTTPException
 from google_play_scraper import app as get_app_info
 import functools
 
+try:
+    from supabase import create_client, Client
+except ImportError:
+    create_client = None
+
 router = APIRouter()
+
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_KEY")
+supabase = None
+if create_client and supabase_url and supabase_key:
+    supabase = create_client(supabase_url, supabase_key)
+
+def check_supabase(package_name):
+    if not supabase: return None
+    try:
+        response = supabase.table('app_categories').select('*').eq('packageName', package_name).execute()
+        return response.data
+    except Exception as e:
+        print(f"Supabase read error: {e}")
+        return None
+
+def insert_supabase(package_name, app_name, category):
+    if not supabase: return
+    try:
+        data = {
+            "packageName": package_name,
+            "category": category
+        }
+        if app_name:
+            data["appname"] = app_name
+            
+        supabase.table('app_categories').insert(data).execute()
+    except Exception as e:
+        print(f"Supabase insert error: {e}")
+
 
 play_store_lock = asyncio.Lock()
 last_request_time = 0.0
@@ -59,6 +94,16 @@ async def get_app_category(request: AppCategoryRequest):
     if not package_name:
         raise HTTPException(status_code=400, detail="Missing packageName")
 
+    loop = asyncio.get_running_loop()
+
+    # 1. Check DB first
+    if supabase:
+        db_data = await loop.run_in_executor(None, check_supabase, package_name)
+        if db_data and len(db_data) > 0:
+            entry = db_data[0]
+            category = entry.get('category')
+            return {"packageName": package_name, "category": category}
+
     global last_request_time
     try:
         async with play_store_lock:
@@ -69,8 +114,6 @@ async def get_app_category(request: AppCategoryRequest):
 
             try:
                 # MUST run the synchronous scraper in a thread executor
-                loop = asyncio.get_running_loop()
-                
                 app_data = None
                 countries = ['us', 'de', 'kr', 'ae']
                 
@@ -91,6 +134,12 @@ async def get_app_category(request: AppCategoryRequest):
                 last_request_time = time.time()
 
         category = app_data.get('genreId', 'Unknown')
+        app_name = app_data.get('title', '')
+        
+        # 2. Insert into DB
+        if supabase and category != 'Unknown':
+            loop.run_in_executor(None, insert_supabase, package_name, app_name, category)
+
         return {"packageName": package_name, "category": category}
 
     except Exception as e:
