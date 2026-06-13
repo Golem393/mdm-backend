@@ -5,6 +5,7 @@ import time
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from google_play_scraper import app as get_app_info
+import functools
 
 router = APIRouter()
 
@@ -69,7 +70,23 @@ async def get_app_category(request: AppCategoryRequest):
             try:
                 # MUST run the synchronous scraper in a thread executor
                 loop = asyncio.get_running_loop()
-                app_data = await loop.run_in_executor(None, get_app_info, package_name)
+                
+                app_data = None
+                countries = ['us', 'de', 'kr', 'ae']
+                
+                for country in countries:
+                    try:
+                        func = functools.partial(get_app_info, package_name, lang='en', country=country)
+                        app_data = await loop.run_in_executor(None, func)
+                        if app_data:
+                            break
+                    except Exception as e:
+                        print(f"Failed to fetch {package_name} in country '{country}': {e}")
+                        continue
+                        
+                if not app_data:
+                    return {"packageName": package_name, "category": 'Unknown'}
+
             finally:
                 last_request_time = time.time()
 
