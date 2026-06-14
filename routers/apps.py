@@ -41,7 +41,7 @@ async def classify_video_player(app_name: str, description: str) -> str:
         prompt = f"App Name: {app_name}\nDescription: {description}\n\nIs this application primarily a Video Player for Entertainment (like streaming services, movies, TV shows) or a Video Player Tool (like local media players, editors, downloaders)? Reply with ONLY 'VideoPlayer Entertainment' or 'VideoPlayer Tools'."
         
         response = await client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-5-nano",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=10
