@@ -38,13 +38,14 @@ async def classify_video_player(app_name: str, description: str) -> str:
     
     try:
         client = openai.AsyncOpenAI(api_key=api_key)
-        prompt = f"App Name: {app_name}\nDescription: {description}\n\nIs this application primarily a Video Player for Entertainment (like streaming services, movies, TV shows) or a Video Player Tool (like local media players, editors, downloaders)? Reply with ONLY 'VideoPlayer Entertainment' or 'VideoPlayer Tools'."
-        print(f"[DEBUG] LLM Input - App Name: '{app_name}' | Description: '{description}'")
+        short_desc = description[:1000] # Truncate to save tokens
+        prompt = f"App Name: {app_name}\nDescription: {short_desc}\n\nIs this application primarily a Video Player for Entertainment (like streaming services, movies, TV shows) or a Video Player Tool (like local media players, editors, downloaders)? Reply with ONLY 'VideoPlayer Entertainment' or 'VideoPlayer Tools'."
+        print(f"[DEBUG] LLM Input - App Name: '{app_name}' | Description: '{short_desc}'")
         
         response = await client.chat.completions.create(
             model="gpt-5-nano",
-            messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=10
+            messages=[{"role": "user", "content": prompt}]
+            # Removed max_completion_tokens because reasoning models need token budget to "think"
         )
         
         result = response.choices[0].message.content.strip()
