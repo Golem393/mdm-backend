@@ -44,7 +44,7 @@ async def classify_video_player(app_name: str, description: str) -> str:
             model="gpt-5-nano",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=10
+            max_completion_tokens=10
         )
         
         result = response.choices[0].message.content.strip()
