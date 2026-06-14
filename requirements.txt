@@ -4,3 +4,4 @@ httpx
 google-play-scraper
 python-dotenv
 supabase
+openai

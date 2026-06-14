@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from google_play_scraper import app as get_app_info
 import functools
+import openai
 
 try:
     from supabase import create_client, Client
@@ -28,6 +29,32 @@ def check_supabase(package_name):
     except Exception as e:
         print(f"Supabase read error: {e}")
         return None
+
+async def classify_video_player(app_name: str, description: str) -> str:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("OPENAI_API_KEY not set. Defaulting to VIDEO_PLAYERS_TOOLS.")
+        return "VIDEO_PLAYERS_TOOLS"
+    
+    try:
+        client = openai.AsyncOpenAI(api_key=api_key)
+        prompt = f"App Name: {app_name}\nDescription: {description}\n\nIs this application primarily a Video Player for Entertainment (like streaming services, movies, TV shows) or a Video Player Tool (like local media players, editors, downloaders)? Reply with ONLY 'VideoPlayer Entertainment' or 'VideoPlayer Tools'."
+        
+        response = await client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=10
+        )
+        
+        result = response.choices[0].message.content.strip()
+        if "Entertainment" in result:
+            return "VIDEO_PLAYERS_ENTERTAINMENT"
+        else:
+            return "VIDEO_PLAYERS_TOOLS"
+    except Exception as e:
+        print(f"LLM Classification error for {app_name}: {e}")
+        return "VIDEO_PLAYERS_TOOLS"
 
 def insert_supabase(package_name, app_name, category):
     if not supabase: return
@@ -136,6 +163,10 @@ async def get_app_category(request: AppCategoryRequest):
         else:
             category = app_data.get('genreId', 'Unknown')
             app_name = app_data.get('title', '')
+            description = app_data.get('description', '')
+            
+            if category == 'VIDEO_PLAYERS':
+                category = await classify_video_player(app_name, description)
         
         # 2. Insert into DB
         if supabase:
