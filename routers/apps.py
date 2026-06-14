@@ -43,7 +43,6 @@ async def classify_video_player(app_name: str, description: str) -> str:
         response = await client.chat.completions.create(
             model="gpt-5-nano",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0,
             max_completion_tokens=10
         )
         
