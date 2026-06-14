@@ -39,7 +39,7 @@ async def classify_video_player(app_name: str, description: str) -> str:
     try:
         client = openai.AsyncOpenAI(api_key=api_key)
         short_desc = description[:1000] # Truncate to save tokens
-        prompt = f"App Name: {app_name}\nDescription: {short_desc}\n\nIs this application primarily a Video Player for Entertainment (like streaming services, movies, TV shows) or a Video Player Tool (like local media players, editors, downloaders)? Reply with ONLY 'VideoPlayer Entertainment' or 'VideoPlayer Tools'."
+        prompt = f"App Name: {app_name}\nDescription: {short_desc}\n\nIs this application primarily distracting and for Entertainment (like streaming services, movies, TV shows) or a Video Player Tool for utility (like local media players, editors, downloaders)? Reply with ONLY 'VideoPlayer Entertainment' or 'VideoPlayer Tools'."
         print(f"[DEBUG] LLM Input - App Name: '{app_name}' | Description: '{short_desc}'")
         
         response = await client.chat.completions.create(
