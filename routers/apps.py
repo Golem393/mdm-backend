@@ -127,17 +127,18 @@ async def get_app_category(request: AppCategoryRequest):
                         print(f"Failed to fetch {package_name} in country '{country}': {e}")
                         continue
                         
-                if not app_data:
-                    return {"packageName": package_name, "category": 'Unknown'}
-
             finally:
                 last_request_time = time.time()
 
-        category = app_data.get('genreId', 'Unknown')
-        app_name = app_data.get('title', '')
+        if not app_data:
+            category = 'Unknown'
+            app_name = None
+        else:
+            category = app_data.get('genreId', 'Unknown')
+            app_name = app_data.get('title', '')
         
         # 2. Insert into DB
-        if supabase and category != 'Unknown':
+        if supabase:
             loop.run_in_executor(None, insert_supabase, package_name, app_name, category)
 
         return {"packageName": package_name, "category": category}
