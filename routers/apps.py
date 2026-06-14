@@ -33,8 +33,8 @@ def check_supabase(package_name):
 async def classify_video_player(app_name: str, description: str) -> str:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        print("OPENAI_API_KEY not set. Defaulting to VIDEO_PLAYERS_TOOLS.")
-        return "VIDEO_PLAYERS_TOOLS"
+        print("OPENAI_API_KEY not set. Defaulting to VIDEO_PLAYERS_ENTERTAINMENT.")
+        return "VIDEO_PLAYERS_ENTERTAINMENT"
     
     try:
         client = openai.AsyncOpenAI(api_key=api_key)
@@ -48,13 +48,13 @@ async def classify_video_player(app_name: str, description: str) -> str:
         )
         
         result = response.choices[0].message.content.strip()
-        if "Entertainment" in result:
-            return "VIDEO_PLAYERS_ENTERTAINMENT"
-        else:
+        if "tools" in result.lower():
             return "VIDEO_PLAYERS_TOOLS"
+        else:
+            return "VIDEO_PLAYERS_ENTERTAINMENT"
     except Exception as e:
         print(f"LLM Classification error for {app_name}: {e}")
-        return "VIDEO_PLAYERS_TOOLS"
+        return "VIDEO_PLAYERS_ENTERTAINMENT"
 
 def insert_supabase(package_name, app_name, category):
     if not supabase: return
