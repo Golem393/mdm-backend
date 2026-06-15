@@ -11,15 +11,29 @@ import stripe
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
-from . import config
-from .supabase_client import (
+import os
+from .apps import (
     get_profile,
     get_user_from_token,
     update_profile,
     update_profile_by_customer,
 )
 
-stripe.api_key = config.STRIPE_SECRET_KEY
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+
+PRICE_TO_PLAN = {
+    os.getenv("STRIPE_PRICE_MONTHLY"): "monthly",
+    os.getenv("STRIPE_PRICE_YEARLY"): "yearly",
+}
+
+PLAN_TO_PRICE = {
+    "monthly": os.getenv("STRIPE_PRICE_MONTHLY"),
+    "yearly": os.getenv("STRIPE_PRICE_YEARLY"),
+}
+
+stripe.api_key = STRIPE_SECRET_KEY
 
 router = APIRouter()
 
@@ -56,7 +70,7 @@ class CheckoutBody(BaseModel):
 @router.post("/checkout")
 def create_checkout(body: CheckoutBody, authorization: str | None = Header(default=None)):
     user = _authed_user(authorization)
-    price_id = config.PLAN_TO_PRICE.get(body.plan)
+    price_id = PLAN_TO_PRICE.get(body.plan)
     if not price_id:
         raise HTTPException(status_code=400, detail="Unknown plan.")
 
@@ -66,8 +80,8 @@ def create_checkout(body: CheckoutBody, authorization: str | None = Header(defau
         customer=customer_id,
         client_reference_id=user.id,
         line_items=[{"price": price_id, "quantity": 1}],
-        success_url=f"{config.FRONTEND_URL}/success?session_id={{CHECKOUT_SESSION_ID}}",
-        cancel_url=f"{config.FRONTEND_URL}/onboarding?plan={body.plan}",
+        success_url=f"{FRONTEND_URL}/success?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{FRONTEND_URL}/onboarding?plan={body.plan}",
         metadata={"supabase_user_id": user.id, "plan": body.plan},
         subscription_data={"metadata": {"supabase_user_id": user.id}},
     )
@@ -84,7 +98,7 @@ def create_portal(authorization: str | None = Header(default=None)):
 
     session = stripe.billing_portal.Session.create(
         customer=customer_id,
-        return_url=f"{config.FRONTEND_URL}/account",
+        return_url=f"{FRONTEND_URL}/account",
     )
     return {"url": session.url}
 
@@ -108,8 +122,8 @@ def _apply_subscription(subscription, override_user_id=None) -> None:
         "subscription_status": status,
         "stripe_subscription_id": getattr(subscription, "id", None),
     }
-    if price_id in config.PRICE_TO_PLAN:
-        values["plan"] = config.PRICE_TO_PLAN[price_id]
+    if price_id in PRICE_TO_PLAN:
+        values["plan"] = PRICE_TO_PLAN[price_id]
     if period_end:
         values["current_period_end"] = datetime.fromtimestamp(
             period_end, tz=timezone.utc
@@ -135,7 +149,7 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(defaul
     payload = await request.body()
     try:
         event = stripe.Webhook.construct_event(
-            payload, stripe_signature, config.STRIPE_WEBHOOK_SECRET
+            payload, stripe_signature, STRIPE_WEBHOOK_SECRET
         )
     except (ValueError, stripe.error.SignatureVerificationError) as e:
         raise HTTPException(status_code=400, detail="Invalid webhook signature.")
