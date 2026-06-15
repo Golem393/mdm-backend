@@ -5,3 +5,6 @@ google-play-scraper
 python-dotenv
 supabase
 openai
+stripe>=8.0
+supabase>=2.4
+python-dotenv>=1.0

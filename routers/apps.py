@@ -30,6 +30,32 @@ def check_supabase(package_name):
         print(f"Supabase read error: {e}")
         return None
 
+
+def get_user_from_token(access_token: str):
+    """Return the authenticated user for a Supabase access token, or None."""
+    try:
+        res = supabase.auth.get_user(access_token)
+    except Exception:
+        return None
+    return res.user if res else None
+
+
+def get_profile(user_id: str) -> Optional[dict]:
+    res = supabase.table("profiles").select("*").eq("id", user_id).maybe_single().execute()
+    return res.data if res else None
+
+
+def update_profile(user_id: str, values: dict) -> None:
+    res = supabase.table("profiles").update(values).eq("id", user_id).execute()
+    if not res.data:
+        print(f"WARNING: Failed to update profile for user {user_id}. RLS might be blocking it (check SUPABASE_SERVICE_ROLE_KEY) or user doesn't exist.")
+
+def update_profile_by_customer(customer_id: str, values: dict) -> None:
+    res = supabase.table("profiles").update(values).eq("stripe_customer_id", customer_id).execute()
+    if not res.data:
+        print(f"WARNING: Failed to update profile for customer {customer_id}. RLS might be blocking it (check SUPABASE_SERVICE_ROLE_KEY) or customer doesn't exist.")
+
+
 async def classify_video_player(app_name: str, description: str) -> str:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
