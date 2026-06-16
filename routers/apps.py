@@ -205,3 +205,53 @@ async def get_app_category(request: AppCategoryRequest):
     except Exception as e:
         print(f"Error in /app-category for {package_name}: {e}")
         return {"packageName": package_name, "category": 'Unknown'}
+
+class SetupAuthRequest(BaseModel):
+    email: str
+    password: str
+
+def verify_user_credentials(email, password):
+    if not create_client or not supabase_url or not supabase_key:
+        raise Exception("Supabase client not configured")
+        
+    temp_client = create_client(supabase_url, supabase_key)
+    auth_response = temp_client.auth.sign_in_with_password({
+        "email": email, 
+        "password": password
+    })
+    
+    user = auth_response.user
+    if not user:
+        raise Exception("Authentication failed")
+        
+    res = temp_client.table("profiles").select("*").eq("id", user.id).maybe_single().execute()
+    profile = res.data
+    
+    if not profile:
+        raise Exception("User profile not found")
+        
+    status = profile.get("subscription_status")
+    if status != "active":
+        raise Exception("Active subscription required. Please manage your plan.")
+        
+    return True
+
+@router.post('/setup-auth')
+async def setup_auth(request: SetupAuthRequest):
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(
+            None, 
+            verify_user_credentials, 
+            request.email, 
+            request.password
+        )
+        return {"success": True}
+    except Exception as e:
+        print(f"Error in /setup-auth: {e}")
+        msg = str(e)
+        if "Invalid login credentials" in msg:
+            msg = "Invalid email or password"
+        elif "Email not confirmed" in msg:
+            msg = "Please verify your email address before logging in"
+        return {"success": False, "errorMessage": msg}
