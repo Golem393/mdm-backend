@@ -6,6 +6,8 @@ FastAPI repo: `from app.stripe_routes import router; app.include_router(router)`
 """
 
 from datetime import datetime, timezone
+import smtplib
+from email.message import EmailMessage
 
 import stripe
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -22,6 +24,12 @@ from .apps import (
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", SMTP_USERNAME)
 
 PRICE_TO_PLAN = {
     os.getenv("STRIPE_PRICE_MONTHLY"): "monthly",
@@ -144,6 +152,43 @@ def _apply_subscription(subscription, override_user_id=None) -> None:
         print("DEBUG _apply_subscription: No user_id or customer_id found to update!")
 
 
+def _send_setup_email(to_email: str):
+    if not SMTP_USERNAME or not SMTP_PASSWORD:
+        print("WARNING: SMTP credentials not set, cannot send setup email.")
+        return
+
+    msg = EmailMessage()
+    msg['Subject'] = "Welcome to Skyward"
+    msg['From'] = SMTP_FROM_EMAIL
+    msg['To'] = to_email
+
+    content = """Hi,
+
+Welcome to Skyward.
+
+Your subscription is now active and you're ready to begin setup.
+
+To get started, please use the link below:
+
+https://skywardos.com/setup
+
+The setup guide will walk you through everything you need to do before installing Skyward, including important steps to help protect your data.
+
+If you have any questions or run into any issues during setup, simply reply to this email and we'll be happy to help.
+
+— The Skyward Team"""
+    msg.set_content(content)
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(msg)
+        print(f"Setup email sent successfully to {to_email}")
+    except Exception as e:
+        print(f"Error sending setup email to {to_email}: {e}")
+
+
 @router.post("/webhook")
 async def stripe_webhook(request: Request, stripe_signature: str = Header(default=None)):
     payload = await request.body()
@@ -169,6 +214,13 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(defaul
             ) or getattr(obj, "client_reference_id", None)
             
             _apply_subscription(subscription, override_user_id=checkout_user_id)
+            
+            customer_details = getattr(obj, "customer_details", {}) or {}
+            to_email = customer_details.get("email") if isinstance(customer_details, dict) else getattr(customer_details, "email", None)
+            if to_email:
+                _send_setup_email(to_email)
+            else:
+                print("WARNING: Could not find email in checkout session to send setup email.")
     elif kind in ("customer.subscription.updated", "customer.subscription.deleted"):
         _apply_subscription(obj)
 
