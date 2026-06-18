@@ -104,7 +104,7 @@ last_request_time = 0.0
 popular_apps_cache = None
 
 def parse_app_categories():
-    csv_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'app_categories.csv')
+    csv_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'app_categories2.csv')
     if not os.path.exists(csv_path):
         return []
     
