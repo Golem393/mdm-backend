@@ -83,7 +83,7 @@ async def blacklist_on_manageengine(package_name: str, app_name: str | None = No
                     {
                         "identifier": package_name,
                         "platform":   1,
-                        "appname":    app_name or package_name,
+                        "appname":    app_name,
                     }
                 ]
             },
