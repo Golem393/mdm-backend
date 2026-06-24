@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 from google_play_scraper import app as get_app_info
 import functools
 import openai
+import httpx
 
 try:
     from supabase import create_client, Client
@@ -84,7 +85,41 @@ async def classify_video_player(app_name: str, description: str) -> str:
         print(f"LLM Classification error for {app_name}: {e}")
         return "VIDEO_PLAYERS_ENTERTAINMENT"
 
-def insert_supabase(package_name, app_name, category):
+BLACKLIST_CATEGORIES = {"ENTERTAINMENT", "SOCIAL", "VIDEO_PLAYERS_ENTERTAINMENT"}
+
+def _is_blacklist_category(category: str) -> bool:
+    """Return True if the category should be blacklisted on ManageEngine."""
+    upper = category.upper()
+    return upper in BLACKLIST_CATEGORIES or "GAME" in upper
+
+async def _blacklist_on_manageengine(package_name: str, app_name: str | None = None) -> None:
+    """POST the app to the ManageEngine blacklist endpoint."""
+    try:
+        from routers.devices import get_zoho_access_token
+        access_token = await get_zoho_access_token()
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                'https://mdm.manageengine.com/api/v1/mdm/blacklist/apps',
+                json={
+                    "apps": [
+                        {
+                            "identifier": package_name,
+                            "platform":   1,
+                            "appname":    app_name or package_name,
+                        }
+                    ]
+                },
+                headers={
+                    'Authorization': f'Zoho-oauthtoken {access_token}',
+                    'Content-Type': 'application/json'
+                }
+            )
+            response.raise_for_status()
+            print(f"[ManageEngine] Blacklisted {package_name}: {response.status_code}")
+    except Exception as e:
+        print(f"[ManageEngine] Failed to blacklist {package_name}: {e}")
+
+async def insert_supabase(package_name, app_name, category):
     if not supabase: return
     try:
         data = {
@@ -97,6 +132,9 @@ def insert_supabase(package_name, app_name, category):
         supabase.table('app_categories').insert(data).execute()
     except Exception as e:
         print(f"Supabase insert error: {e}")
+
+    if category and _is_blacklist_category(category):
+        await _blacklist_on_manageengine(package_name, app_name=app_name)
 
 
 play_store_lock = asyncio.Lock()
@@ -196,9 +234,9 @@ async def get_app_category(request: AppCategoryRequest):
             if category == 'VIDEO_PLAYERS':
                 category = await classify_video_player(app_name, description)
         
-        # 2. Insert into DB
+        # 2. Insert into DB and conditionally blacklist on ManageEngine
         if supabase:
-            loop.run_in_executor(None, insert_supabase, package_name, app_name, category)
+            asyncio.ensure_future(insert_supabase(package_name, app_name, category))
 
         return {"packageName": package_name, "category": category}
 
