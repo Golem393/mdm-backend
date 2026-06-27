@@ -32,6 +32,9 @@ from routers import devices
 from routers import apps
 from routers import stripe_routes
 
+# Public routes (no API key required)
+app.include_router(apps.public_router, prefix="/api")
+
 # Register routes to the root (/) requiring the API Key
 app.include_router(devices.router, prefix="/api", dependencies=[Depends(get_api_key)])
 app.include_router(apps.router, prefix="/api", dependencies=[Depends(get_api_key)])

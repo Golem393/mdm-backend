@@ -17,6 +17,7 @@ except ImportError:
     create_client = None
 
 router = APIRouter()
+public_router = APIRouter()  # Routes on this router require no API key
 
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_KEY")
@@ -241,7 +242,7 @@ def parse_app_categories():
                 apps.append({"packageName": package_name, "category": category})
     return apps
 
-@router.get('/blocked-app-search')
+@public_router.get('/blocked-app-search')
 # Currently only the US is being used when searching if an app exists. Apps like Tesco Grocery & Clubcard are only available in the UK but not the USA.
 async def app_search(app_name: str):
     try:
