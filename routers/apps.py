@@ -21,9 +21,16 @@ public_router = APIRouter()  # Routes on this router require no API key
 
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_KEY")
+supabase_service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
 supabase = None
 if create_client and supabase_url and supabase_key:
     supabase = create_client(supabase_url, supabase_key)
+
+# Admin client uses the service role key — bypasses RLS and can create users.
+supabase_admin = None
+if create_client and supabase_url and supabase_service_role_key:
+    supabase_admin = create_client(supabase_url, supabase_service_role_key)
 
 def check_supabase(package_name):
     if not supabase: return None
@@ -45,17 +52,28 @@ def get_user_from_token(access_token: str):
 
 
 def get_profile(user_id: str) -> Optional[dict]:
-    res = supabase.table("profiles").select("*").eq("id", user_id).maybe_single().execute()
+    client = supabase_admin
+    if not client:
+        return None
+    res = client.table("profiles").select("*").eq("id", user_id).maybe_single().execute()
     return res.data if res else None
 
 
 def update_profile(user_id: str, values: dict) -> None:
-    res = supabase.table("profiles").update(values).eq("id", user_id).execute()
+    client = supabase_admin
+    if not client:
+        print(f"WARNING: No Supabase client available to update profile for user {user_id}.")
+        return
+    res = client.table("profiles").update(values).eq("id", user_id).execute()
     if not res.data:
         print(f"WARNING: Failed to update profile for user {user_id}. RLS might be blocking it (check SUPABASE_SERVICE_ROLE_KEY) or user doesn't exist.")
 
 def update_profile_by_customer(customer_id: str, values: dict) -> None:
-    res = supabase.table("profiles").update(values).eq("stripe_customer_id", customer_id).execute()
+    client = supabase_admin
+    if not client:
+        print(f"WARNING: No Supabase client available to update profile for customer {customer_id}.")
+        return
+    res = client.table("profiles").update(values).eq("stripe_customer_id", customer_id).execute()
     if not res.data:
         print(f"WARNING: Failed to update profile for customer {customer_id}. RLS might be blocking it (check SUPABASE_SERVICE_ROLE_KEY) or customer doesn't exist.")
 
