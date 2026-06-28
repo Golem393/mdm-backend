@@ -4,9 +4,12 @@ import asyncio
 import time
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
-from google_play_scraper import app as get_app_info
+from google_play_scraper import app as get_app_info, search as play_store_search
 import functools
 import openai
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import quote_plus, urlparse, parse_qs
 
 try:
     from supabase import create_client, Client
@@ -14,6 +17,7 @@ except ImportError:
     create_client = None
 
 router = APIRouter()
+public_router = APIRouter()  # Routes on this router require no API key
 
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_KEY")
@@ -54,6 +58,32 @@ def update_profile_by_customer(customer_id: str, values: dict) -> None:
     res = supabase.table("profiles").update(values).eq("stripe_customer_id", customer_id).execute()
     if not res.data:
         print(f"WARNING: Failed to update profile for customer {customer_id}. RLS might be blocking it (check SUPABASE_SERVICE_ROLE_KEY) or customer doesn't exist.")
+
+def get_first_app_id(query: str):
+    search_url = f"https://play.google.com/store/search?q={quote_plus(query)}&c=apps&gl=us"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    response = requests.get(search_url, headers=headers, timeout=10)
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    for link in soup.find_all("a", href=True):
+        href = link["href"]
+
+        if "/store/apps/details" in href and "id=" in href:
+            parsed = urlparse(href)
+            params = parse_qs(parsed.query)
+
+            app_id = params.get("id", [None])[0]
+
+            if app_id:
+                return app_id
+
+    return None
 
 
 async def classify_video_player(app_name: str, description: str) -> str:
@@ -98,6 +128,89 @@ def insert_supabase(package_name, app_name, category):
     except Exception as e:
         print(f"Supabase insert error: {e}")
 
+async def lookup_app_category(package_name: str):
+    if not package_name:
+        raise HTTPException(status_code=400, detail="Missing packageName")
+
+    loop = asyncio.get_running_loop()
+
+    # 1. Check DB first
+    if supabase:
+        db_data = await loop.run_in_executor(None, check_supabase, package_name)
+        if db_data and len(db_data) > 0:
+            entry = db_data[0]
+            category = entry.get("category")
+            appName = entry.get("appname")
+            return {"packageName": package_name, "category": category, "appName" : appName}
+
+    global last_request_time
+
+    try:
+        async with play_store_lock:
+            now = time.time()
+            elapsed = now - last_request_time
+            if elapsed < 0.5:
+                await asyncio.sleep(0.5 - elapsed)
+
+            try:
+                app_data = None
+                # Edge cases exist like Tesco Grocery & Clubcard are only available in the UK, but not US
+                countries = ["us", "de", "kr", "ae"]
+
+                for country in countries:
+                    try:
+                        func = functools.partial(
+                            get_app_info,
+                            package_name,
+                            lang="en",
+                            country=country
+                        )
+                        app_data = await loop.run_in_executor(None, func)
+
+                        if app_data:
+                            break
+
+                    except Exception as e:
+                        print(f"Failed to fetch {package_name} in country '{country}': {e}")
+                        continue
+
+            finally:
+                last_request_time = time.time()
+
+        if not app_data:
+            category = "Unknown"
+            app_name = None
+        else:
+            category = app_data.get("genreId", "Unknown")
+            app_name = app_data.get("title", "")
+            description = app_data.get("description", "")
+
+            if category == "VIDEO_PLAYERS":
+                category = await classify_video_player(app_name, description)
+
+        # 2. Insert into DB
+        if supabase:
+            await loop.run_in_executor(
+                None,
+                insert_supabase,
+                package_name,
+                app_name,
+                category
+            )
+
+        return {
+            "packageName": package_name,
+            "category": category,
+            "appName" : app_name
+        }
+
+    except Exception as e:
+        print(f"Error looking up category for {package_name}: {e}")
+        return {
+            "packageName": package_name,
+            "category": "Unknown"
+        }
+
 
 play_store_lock = asyncio.Lock()
 last_request_time = 0.0
@@ -129,6 +242,38 @@ def parse_app_categories():
                 apps.append({"packageName": package_name, "category": category})
     return apps
 
+@public_router.get('/blocked-app-search')
+# Currently only the US is being used when searching if an app exists. Apps like Tesco Grocery & Clubcard are only available in the UK but not the USA.
+async def app_search(app_name: str):
+    try:
+        app_id = get_first_app_id(app_name)
+        
+        if not app_id:
+            raise HTTPException(status_code=404, detail="No app found")
+
+        category_result = await lookup_app_category(app_id)
+        category = category_result.get("category")
+        app_status = ""
+
+        if category in {"SOCIAL", "ENTERTAINMENT", "VIDEO_PLAYERS_ENTERTAINMENT"} or "GAME" in category:
+            app_status = "Blocked"
+        else:
+            app_status = "Allowed"
+
+        return {
+            "app_id": app_id,
+            "category": category,
+            "status": app_status,
+            "appName" : category_result.get("appName")
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        print(f"Error in /blocked-app-search: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch app")
+
 @router.get('/popular-apps')
 async def get_popular_apps():
     global popular_apps_cache
@@ -145,66 +290,7 @@ class AppCategoryRequest(BaseModel):
 
 @router.post('/app-category')
 async def get_app_category(request: AppCategoryRequest):
-    package_name = request.packageName
-    if not package_name:
-        raise HTTPException(status_code=400, detail="Missing packageName")
-
-    loop = asyncio.get_running_loop()
-
-    # 1. Check DB first
-    if supabase:
-        db_data = await loop.run_in_executor(None, check_supabase, package_name)
-        if db_data and len(db_data) > 0:
-            entry = db_data[0]
-            category = entry.get('category')
-            return {"packageName": package_name, "category": category}
-
-    global last_request_time
-    try:
-        async with play_store_lock:
-            now = time.time()
-            elapsed = now - last_request_time
-            if elapsed < 0.5:
-                await asyncio.sleep(0.5 - elapsed)
-
-            try:
-                # MUST run the synchronous scraper in a thread executor
-                app_data = None
-                countries = ['us', 'de', 'kr', 'ae']
-                
-                for country in countries:
-                    try:
-                        func = functools.partial(get_app_info, package_name, lang='en', country=country)
-                        app_data = await loop.run_in_executor(None, func)
-                        if app_data:
-                            break
-                    except Exception as e:
-                        print(f"Failed to fetch {package_name} in country '{country}': {e}")
-                        continue
-                        
-            finally:
-                last_request_time = time.time()
-
-        if not app_data:
-            category = 'Unknown'
-            app_name = None
-        else:
-            category = app_data.get('genreId', 'Unknown')
-            app_name = app_data.get('title', '')
-            description = app_data.get('description', '')
-            
-            if category == 'VIDEO_PLAYERS':
-                category = await classify_video_player(app_name, description)
-        
-        # 2. Insert into DB
-        if supabase:
-            loop.run_in_executor(None, insert_supabase, package_name, app_name, category)
-
-        return {"packageName": package_name, "category": category}
-
-    except Exception as e:
-        print(f"Error in /app-category for {package_name}: {e}")
-        return {"packageName": package_name, "category": 'Unknown'}
+    return await lookup_app_category(request.packageName)
 
 class SetupAuthRequest(BaseModel):
     email: str
