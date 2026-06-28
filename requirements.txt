@@ -9,4 +9,3 @@ stripe>=8.0
 supabase>=2.4
 python-dotenv>=1.0
 bs4
-urllib.parse
