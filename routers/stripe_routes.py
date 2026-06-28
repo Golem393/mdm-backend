@@ -157,16 +157,18 @@ def _get_or_create_supabase_user(email: str, stripe_customer_id: str) -> str | N
     """
     Attempt to create a new Supabase user for *email*.
     If the user already exists, Supabase raises an error — we catch it and
-    return None so _apply_subscription falls back to matching by stripe_customer_id.
+    return the existing user's ID (or fall back to None) to apply subscription and check terms.
     """
     if not supabase_admin:
         print("WARNING: supabase_admin not configured — cannot create user.")
         return None
 
+    user_id = None
+    profile = None
+
     try:
         response = supabase_admin.auth.admin.create_user({
             "email": email,
-            "email_confirm": True,  # mark email as confirmed immediately
         })
         user = response.user
         if not user:
@@ -175,18 +177,43 @@ def _get_or_create_supabase_user(email: str, stripe_customer_id: str) -> str | N
 
         print(f"Created Supabase user {user.id} for {email}")
 
+
         # Seed the profile with the Stripe customer id so billing lookups work.
-        update_profile(user.id, {"stripe_customer_id": stripe_customer_id})
-        return user.id
+        update_profile(user_id, {"stripe_customer_id": stripe_customer_id})
+        
+        # Get the newly created profile
+        profile = get_profile(user_id)
     except Exception as e:
         err = str(e).lower()
         if "already" in err or "exists" in err or "registered" in err:
-            # User already has an account — subscription will be matched via
-            # stripe_customer_id in _apply_subscription.
             print(f"User already exists for {email}, skipping creation.")
+            try:
+                res = supabase_admin.table("profiles").select("*").eq("email", email).maybe_single().execute()
+                profile = res.data if res else None
+                if profile:
+                    user_id = profile.get("id")
+                    # Update stripe_customer_id if not set
+                    if not profile.get("stripe_customer_id"):
+                        update_profile(user_id, {"stripe_customer_id": stripe_customer_id})
+            except Exception as lookup_err:
+                print(f"WARNING: Could not retrieve existing profile for {email}: {lookup_err}")
         else:
             print(f"ERROR: Failed to create Supabase user for {email}: {e}")
-        return None
+
+    # Check and update terms if necessary
+    if user_id and profile:
+        if profile.get("terms_accepted_at") is None:
+            now_str = datetime.now(timezone.utc).isoformat()
+            try:
+                update_profile(user_id, {
+                    "terms_accepted_at": now_str,
+                    "terms_version": "2026-06-29"
+                })
+                print(f"Updated terms acceptance (version 2026-06-29) for user {user_id}")
+            except Exception as update_err:
+                print(f"WARNING: Failed to update terms acceptance for user {user_id}: {update_err}")
+
+    return user_id
 
 
 def _send_create_password_email(to_email: str) -> None:
@@ -223,14 +250,14 @@ def _send_create_password_email(to_email: str) -> None:
     msg['From'] = SMTP_FROM_EMAIL
     msg['To'] = to_email
 
-    content = f"""Hi,
+    plain_content = f"""Hi,
 
 Welcome to Skyward — your subscription is now active!
 
 To get started, you'll first need to create a password for your account.
 Click the link below to set your password (the link expires in 24 hours):
 
-{magic_link}
+Create password: {magic_link}
 
 Once you've created your password you'll be taken straight to setup,
 where we'll walk you through everything before installing Skyward.
@@ -238,7 +265,22 @@ where we'll walk you through everything before installing Skyward.
 If you have any questions, just reply to this email and we'll be happy to help.
 
 — The Skyward Team"""
-    msg.set_content(content)
+    msg.set_content(plain_content)
+
+    html_content = f"""<html>
+  <body>
+    <p>Hi,</p>
+    <p>Welcome to Skyward — your subscription is now active!</p>
+    <p>To get started, you'll first need to create a password for your account.<br>
+    Click the link below to set your password (the link expires in 24 hours):</p>
+    <p><a href="{magic_link}">Create password</a></p>
+    <p>Once you've created your password you'll be taken straight to setup,<br>
+    where we'll walk you through everything before installing Skyward.</p>
+    <p>If you have any questions, just reply to this email and we'll be happy to help.</p>
+    <p>— The Skyward Team</p>
+  </body>
+</html>"""
+    msg.add_alternative(html_content, subtype='html')
 
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
