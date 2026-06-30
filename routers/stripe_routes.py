@@ -18,7 +18,10 @@ from .apps import (
     get_profile,
     get_user_from_token,
     update_profile,
-    update_profile_by_customer,
+    get_subscription,
+    upsert_subscription,
+    upsert_subscription_by_customer,
+    get_stripe_customer_id,
     supabase_admin,
 )
 
@@ -59,8 +62,7 @@ def _authed_user(authorization: str | None):
 
 def _ensure_customer(user) -> str:
     """Return the user's Stripe customer id, creating + persisting one if needed."""
-    profile = get_profile(user.id) or {}
-    customer_id = profile.get("stripe_customer_id")
+    customer_id = get_stripe_customer_id(user.id)
     if customer_id:
         return customer_id
 
@@ -68,7 +70,7 @@ def _ensure_customer(user) -> str:
         email=user.email,
         metadata={"supabase_user_id": user.id},
     )
-    update_profile(user.id, {"stripe_customer_id": customer.id})
+    upsert_subscription(user.id, {"stripe_customer_id": customer.id})
     return customer.id
 
 
@@ -77,7 +79,27 @@ class CheckoutBody(BaseModel):
 
 
 @router.post("/checkout")
-def create_checkout(body: CheckoutBody, authorization: str | None = Header(default=None)):
+def create_checkout(body: CheckoutBody):
+    """Anonymous checkout — no auth required. The webhook creates the Supabase
+    user after the payment succeeds (checkout.session.completed)."""
+    price_id = PLAN_TO_PRICE.get(body.plan)
+    print(price_id)
+    if not price_id:
+        raise HTTPException(status_code=400, detail="Unknown plan.")
+
+    session = stripe.checkout.Session.create(
+        mode="subscription",
+        line_items=[{"price": price_id, "quantity": 1}],
+        success_url=f"{FRONTEND_URL}/success?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{FRONTEND_URL}/#pricing",
+        metadata={"plan": body.plan},
+    )
+    return {"url": session.url}
+
+
+@router.post("/checkout/authenticated")
+def create_checkout_authenticated(body: CheckoutBody, authorization: str | None = Header(default=None)):
+    """Authenticated checkout — for logged-in users starting/changing a plan."""
     user = _authed_user(authorization)
     price_id = PLAN_TO_PRICE.get(body.plan)
     if not price_id:
@@ -100,8 +122,7 @@ def create_checkout(body: CheckoutBody, authorization: str | None = Header(defau
 @router.post("/portal")
 def create_portal(authorization: str | None = Header(default=None)):
     user = _authed_user(authorization)
-    profile = get_profile(user.id) or {}
-    customer_id = profile.get("stripe_customer_id")
+    customer_id = get_stripe_customer_id(user.id)
     if not customer_id:
         raise HTTPException(status_code=400, detail="No billing account yet.")
 
@@ -113,10 +134,10 @@ def create_portal(authorization: str | None = Header(default=None)):
 
 
 def _apply_subscription(subscription, override_user_id=None) -> None:
-    """Sync a Stripe subscription object onto the matching profile row."""
+    """Sync a Stripe subscription object onto the subscription table."""
     customer_id = getattr(subscription, "customer", None)
     status = getattr(subscription, "status", None)  # active | canceled | past_due | ...
-    
+
     items = getattr(subscription, "items", None)
     data = getattr(items, "data", []) if items else []
     price_id = None
@@ -124,20 +145,25 @@ def _apply_subscription(subscription, override_user_id=None) -> None:
         price = getattr(data[0], "price", None)
         if price:
             price_id = getattr(price, "id", None)
-            
+
     period_end = getattr(subscription, "current_period_end", None)
+    canceled_at = getattr(subscription, "canceled_at", None)
 
     values = {
-        "subscription_status": status,
+        "status": status,
         "stripe_subscription_id": getattr(subscription, "id", None),
+        "stripe_customer_id": customer_id,
     }
     if price_id in PRICE_TO_PLAN:
         values["plan"] = PRICE_TO_PLAN[price_id]
     if period_end:
-        values["current_period_end"] = datetime.fromtimestamp(
+        values["subscription_end_date"] = datetime.fromtimestamp(
             period_end, tz=timezone.utc
-        ).isoformat()
-
+            ).isoformat()
+    if canceled_at:
+        values["canceled_at_date"] = datetime.fromtimestamp(
+            canceled_at, tz=timezone.utc
+            ).isoformat()
 
     # Prefer the explicit user id (passed in or set on the subscription metadata) and fall
     # back to matching on the Stripe customer id.
@@ -145,11 +171,10 @@ def _apply_subscription(subscription, override_user_id=None) -> None:
     metadata_user_id = metadata.get("supabase_user_id") if isinstance(metadata, dict) else getattr(metadata, "supabase_user_id", None)
     user_id = override_user_id or metadata_user_id
 
-    
     if user_id:
-        update_profile(user_id, values)
+        upsert_subscription(user_id, values)
     elif customer_id:
-        update_profile_by_customer(customer_id, values)
+        upsert_subscription_by_customer(customer_id, values)
     else:
         print("DEBUG _apply_subscription: No user_id or customer_id found to update!")
 
@@ -176,12 +201,13 @@ def _get_or_create_supabase_user(email: str, stripe_customer_id: str) -> str | N
 
         print(f"Created Supabase user {user.id} for {email}")
 
-        # Seed the profile with the Stripe customer id and terms acceptance.
+        # Seed the profile with terms acceptance.
         update_profile(user.id, {
-            "stripe_customer_id": stripe_customer_id,
             "terms_accepted_at": datetime.now(timezone.utc).isoformat(),
             "terms_version": "2026-06-29",
         })
+        # Seed the subscription table with the Stripe customer id.
+        upsert_subscription(user.id, {"stripe_customer_id": stripe_customer_id})
         return user.id
     except Exception as e:
         err = str(e).lower()
