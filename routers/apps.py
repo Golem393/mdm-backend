@@ -2,6 +2,7 @@ import os
 import csv
 import asyncio
 import time
+from typing import Optional
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from google_play_scraper import app as get_app_info, search as play_store_search
@@ -51,7 +52,7 @@ def get_user_from_token(access_token: str):
     return res.user if res else None
 
 
-def get_profile(user_id: str):
+def get_profile(user_id: str) -> Optional[dict]:
     client = supabase_admin
     if not client:
         return None
@@ -76,51 +77,6 @@ def update_profile_by_customer(customer_id: str, values: dict) -> None:
     res = client.table("profiles").update(values).eq("stripe_customer_id", customer_id).execute()
     if not res.data:
         print(f"WARNING: Failed to update profile for customer {customer_id}. RLS might be blocking it (check SUPABASE_SERVICE_ROLE_KEY) or customer doesn't exist.")
-
-
-# ── Subscription table helpers ────────────────────────────────────────────────
-
-def get_subscription(user_id: str) -> dict | None:
-    """Fetch the subscription row for a given user_id."""
-    client = supabase_admin
-    if not client:
-        return None
-    res = client.table("subscription").select("*").eq("user_id", user_id).maybe_single().execute()
-    return res.data if res else None
-
-
-def upsert_subscription(user_id: str, values: dict) -> None:
-    """Insert or update the subscription row for a user_id."""
-    client = supabase_admin
-    if not client:
-        print(f"WARNING: No Supabase client available to upsert subscription for user {user_id}.")
-        return
-    payload = {"user_id": user_id, **values}
-    # Try update first; if no row exists yet, insert.
-    res = client.table("subscription").update(values).eq("user_id", user_id).execute()
-    if not res.data:
-        res = client.table("subscription").insert(payload).execute()
-        if not res.data:
-            print(f"WARNING: Failed to upsert subscription for user {user_id}.")
-
-
-def upsert_subscription_by_customer(customer_id: str, values: dict) -> None:
-    """Update the subscription row that matches a stripe_customer_id."""
-    client = supabase_admin
-    if not client:
-        print(f"WARNING: No Supabase client available to update subscription for customer {customer_id}.")
-        return
-    res = client.table("subscription").update(values).eq("stripe_customer_id", customer_id).execute()
-    if not res.data:
-        print(f"WARNING: Failed to update subscription for customer {customer_id}. Row may not exist yet.")
-
-
-def get_stripe_customer_id(user_id: str) -> str | None:
-    """Quick lookup of stripe_customer_id from the subscription table."""
-    sub = get_subscription(user_id)
-    return sub.get("stripe_customer_id") if sub else None
-
-
 
 def get_first_app_id(query: str):
     search_url = f"https://play.google.com/store/search?q={quote_plus(query)}&c=apps&gl=us"
