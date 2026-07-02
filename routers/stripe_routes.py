@@ -116,6 +116,7 @@ def _ensure_customer(user) -> str:
 
 class CheckoutBody(BaseModel):
     plan: str  # "monthly" | "yearly"
+    seats: int = 1
 
 
 @router.post("/checkout")
@@ -129,7 +130,7 @@ def create_checkout(body: CheckoutBody):
 
     session = stripe.checkout.Session.create(
         mode="subscription",
-        line_items=[{"price": price_id, "quantity": 1}],
+        line_items=[{"price": price_id, "quantity": body.seats}],
         success_url=f"{FRONTEND_URL}/success?session_id={{CHECKOUT_SESSION_ID}}",
         cancel_url=f"{FRONTEND_URL}/#pricing",
         metadata={"plan": body.plan},
@@ -150,9 +151,9 @@ def create_checkout_authenticated(body: CheckoutBody, authorization: str | None 
         mode="subscription",
         customer=customer_id,
         client_reference_id=user.id,
-        line_items=[{"price": price_id, "quantity": 1}],
-        success_url=f"{FRONTEND_URL}/success?session_id={{CHECKOUT_SESSION_ID}}",
-        cancel_url=f"{FRONTEND_URL}/onboarding?plan={body.plan}",
+        line_items=[{"price": price_id, "quantity": body.seats}],
+        success_url=f"{FRONTEND_URL}/success?session_id={{CHECKOUT_SESSION_ID}}&auth=true",
+        cancel_url=f"{FRONTEND_URL}/account",
         metadata={"supabase_user_id": user.id, "plan": body.plan},
         subscription_data={"metadata": {"supabase_user_id": user.id}},
     )
@@ -200,10 +201,15 @@ def _apply_subscription(subscription, override_user_id=None) -> None:
         values["subscription_end_date"] = datetime.fromtimestamp(
             period_end, tz=timezone.utc
             ).isoformat()
+    else:
+        values["subscription_end_date"] = None
+
     if canceled_at:
         values["canceled_at_date"] = datetime.fromtimestamp(
             canceled_at, tz=timezone.utc
             ).isoformat()
+    else:
+        values["canceled_at_date"] = None
 
     # Prefer the explicit user id (passed in or set on the subscription metadata) and fall
     # back to matching on the Stripe customer id.
@@ -362,8 +368,11 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(defaul
 
         # --- Create (or look up) the Supabase user from the purchaser's email ---
         user_id = None
+        is_new_user = False
         if to_email and stripe_customer_id:
             user_id = _get_or_create_supabase_user(to_email, stripe_customer_id)
+            if user_id:
+                is_new_user = True
         elif to_email:
             print(f"WARNING: No stripe_customer_id on checkout session for {to_email}")
 
@@ -371,13 +380,13 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(defaul
             subscription = stripe.Subscription.retrieve(sub_id)
             _apply_subscription(subscription, override_user_id=user_id)
 
-        if to_email:
+        if to_email and is_new_user:
             try:
                 _send_create_password_email(to_email)
             except Exception as e:
                 print(f"CRITICAL: Failed to handle post-checkout email for {to_email}: {e}")
                 raise HTTPException(status_code=500, detail="Failed to send create-password email.")
-        else:
+        elif not to_email:
             print("WARNING: Could not find email in checkout session to send create-password email.")
     elif kind in ("customer.subscription.updated", "customer.subscription.deleted"):
         _apply_subscription(obj)
