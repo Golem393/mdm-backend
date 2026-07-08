@@ -311,6 +311,120 @@ class AppCategoryRequest(BaseModel):
 async def get_app_category(request: AppCategoryRequest):
     return await lookup_app_category(request.packageName)
 
+def check_domain_supabase(domain):
+    if not supabase_admin: return None
+    try:
+        response = supabase_admin.table('website').select('*').eq('domain', domain).execute()
+        return response.data
+    except Exception as e:
+        print(f"Supabase domain read error: {e}")
+        return None
+
+import json
+
+def insert_domain_supabase(domain, category, confidence=None):
+    if not supabase_admin: return
+    try:
+        data = {
+            "domain": domain,
+            "category": category
+        }
+        if confidence is not None:
+            data["confidence"] = confidence
+        supabase_admin.table('website').insert(data).execute()
+    except Exception as e:
+        print(f"Supabase domain insert error: {e}")
+
+async def fetch_domain_metadata(domain: str) -> tuple[str, str]:
+    loop = asyncio.get_running_loop()
+    def _fetch():
+        try:
+            url = domain if domain.startswith("http") else f"https://{domain}"
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            response = requests.get(url, headers=headers, timeout=5)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, "html.parser")
+                title = soup.title.string.strip() if soup.title and soup.title.string else ""
+                meta_desc = soup.find("meta", attrs={"name": "description"})
+                desc = meta_desc["content"].strip() if meta_desc and "content" in meta_desc.attrs else ""
+                if len(desc) > 200:
+                    desc = desc[:200]
+                return title, desc
+        except Exception as e:
+            print(f"Error fetching metadata for {domain}: {e}")
+        return "", ""
+    return await loop.run_in_executor(None, _fetch)
+
+async def classify_domain(domain: str, title: str = "", description: str = "") -> tuple[str, int]:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("OPENAI_API_KEY not set. Defaulting to Unknown.")
+        return "Unknown", 0
+    
+    try:
+        client = openai.AsyncOpenAI(api_key=api_key)
+        prompt = f'Classify the website based on its primary function: {domain}. Classify as SOCIAL if community discussion or social interaction is the website\'s primary value. Choose exactly one of: WORK, EDUCATION, BUSINESS, FINANCE, GOVERNMENT, HEALTHCARE, UTILITIES, REFERENCE, SHOPPING, SOCIAL, ENTERTAINMENT, DATING, GAME, NEWS, ADULT, GAMBLING, OTHER, UNKNOWN. Return only valid JSON, and ensure confidence is an integer between 0 and 100: {{"category":"WORK","confidence":97}}'
+        
+        if title or description:
+            prompt += f"\n\nWebsite Title: {title}\nWebsite Description: {description}"
+            
+        response = await client.chat.completions.create(
+            model="gpt-5-nano",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={ "type": "json_object" },
+            reasoning_effort="low"
+        )
+        
+        result_str = response.choices[0].message.content.strip()
+        print(f"[DEBUG] LLM classification for domain '{domain}': {result_str}")
+        result_json = json.loads(result_str)
+        return result_json.get("category", "Unknown"), result_json.get("confidence", 0)
+    except Exception as e:
+        print(f"LLM Classification error for domain {domain}: {e}")
+        return "Unknown", 0
+
+async def lookup_domain_category(domain: str):
+    if not domain:
+        raise HTTPException(status_code=400, detail="Missing domain")
+
+    loop = asyncio.get_running_loop()
+
+    # 1. Check DB first
+    if supabase_admin:
+        db_data = await loop.run_in_executor(None, check_domain_supabase, domain)
+        if db_data and len(db_data) > 0:
+            entry = db_data[0]
+            category = entry.get("category")
+            confidence = entry.get("confidence")
+            return {"domain": domain, "category": category, "confidence": confidence}
+
+    # 2. Use OpenAI if not found
+    title, description = await fetch_domain_metadata(domain)
+    category, confidence = await classify_domain(domain, title=title, description=description)
+
+    # 3. Insert into DB
+    if supabase_admin:
+        await loop.run_in_executor(
+            None,
+            insert_domain_supabase,
+            domain,
+            category,
+            confidence
+        )
+
+    return {
+        "domain": domain,
+        "category": category,
+        "confidence": confidence
+    }
+
+class DomainCategoryRequest(BaseModel):
+    domain: str
+
+@public_router.post('/domain-category')
+async def get_domain_category(request: DomainCategoryRequest):
+    return await lookup_domain_category(request.domain)
+
 class SetupAuthRequest(BaseModel):
     email: str
     password: str
