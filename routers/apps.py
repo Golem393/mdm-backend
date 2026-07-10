@@ -274,7 +274,7 @@ async def app_search(app_name: str):
         category = category_result.get("category")
         app_status = ""
 
-        if category in {"SOCIAL", "ENTERTAINMENT", "VIDEO_PLAYERS_ENTERTAINMENT"} or "GAME" in category:
+        if category in {"SOCIAL", "ENTERTAINMENT", "VIDEO_PLAYERS_ENTERTAINMENT", "BROWSER"} or "GAME" in category:
             app_status = "Blocked"
         else:
             app_status = "Allowed"
