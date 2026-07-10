@@ -338,21 +338,41 @@ def insert_domain_supabase(domain, category, confidence=None):
 async def fetch_domain_metadata(domain: str) -> tuple[str, str]:
     loop = asyncio.get_running_loop()
     def _fetch():
+        title = ""
+        desc = ""
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         try:
             url = domain if domain.startswith("http") else f"https://{domain}"
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
             response = requests.get(url, headers=headers, timeout=5)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, "html.parser")
                 title = soup.title.string.strip() if soup.title and soup.title.string else ""
                 meta_desc = soup.find("meta", attrs={"name": "description"})
                 desc = meta_desc["content"].strip() if meta_desc and "content" in meta_desc.attrs else ""
-                if len(desc) > 200:
-                    desc = desc[:200]
-                return title, desc
         except Exception as e:
             print(f"Error fetching metadata for {domain}: {e}")
-        return "", ""
+
+        # Fallback to DuckDuckGo search if direct metadata scrape fails.
+        # Single-page applications, flash games, or domains that simply redirect (e.g., slither.io -> slither.com) 
+        # often return a mostly blank HTML document with no <title> or <meta> description.
+        # By searching DDG for 'site:domain.com', we can extract the search engine's indexed snippet, 
+        # which provides a rich, text-heavy description of the site perfect for the LLM to classify.
+        if len(desc) < 10:
+            try:
+                search_url = f"https://html.duckduckgo.com/html/?q=site:{quote_plus(domain)}"
+                res = requests.get(search_url, headers=headers, timeout=5)
+                if res.status_code == 200:
+                    soup = BeautifulSoup(res.text, "html.parser")
+                    snippet = soup.find('a', class_='result__snippet')
+                    if snippet and snippet.text:
+                        desc = snippet.text.strip()
+                        print(f"[DEBUG] Fallback to DDG for {domain}: {desc}")
+            except Exception as e:
+                print(f"Error fetching DDG fallback for {domain}: {e}")
+
+        if len(desc) > 300:
+            desc = desc[:300]
+        return title, desc
     return await loop.run_in_executor(None, _fetch)
 
 async def classify_domain(domain: str, title: str = "", description: str = "") -> tuple[str, int]:
