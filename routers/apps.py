@@ -133,6 +133,34 @@ async def classify_video_player(app_name: str, description: str) -> str:
         print(f"LLM Classification error for {app_name}: {e}")
         return "VIDEO_PLAYERS_ENTERTAINMENT"
 
+async def classify_browser(app_name: str, description: str) -> bool:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("OPENAI_API_KEY not set. Defaulting to False for browser classification.")
+        return False
+    
+    try:
+        client = openai.AsyncOpenAI(api_key=api_key)
+        short_desc = description[:500] # Truncate to save tokens
+        prompt = f"App Name: {app_name}\nDescription: {short_desc}\n\nBased on the name and description, is this application primarily a web browser or a web search engine (like Google Search, Yahoo Search, Bing, etc.)? Reply with ONLY 'Yes' or 'No'."
+        print(f"[DEBUG] LLM Input - App Name: '{app_name}' | Description: '{short_desc}'")
+        
+        response = await client.chat.completions.create(
+            model="gpt-5-nano",
+            messages=[{"role": "user", "content": prompt}]
+            # Removed max_completion_tokens because reasoning models need token budget to "think"
+        )
+        
+        result = response.choices[0].message.content.strip()
+        print(f"[DEBUG] LLM browser classification for '{app_name}': {result}")
+        if result.lower().startswith("yes"):
+            return True
+        else:
+            return False
+    except Exception as e:
+        print(f"LLM Classification error for {app_name}: {e}")
+        return False
+
 def insert_supabase(package_name, app_name, category):
     if not supabase: return
     try:
@@ -206,6 +234,11 @@ async def lookup_app_category(package_name: str):
 
             if category == "VIDEO_PLAYERS":
                 category = await classify_video_player(app_name, description)
+            elif category in ("COMMUNICATION", "TOOLS", "PRODUCTIVITY"):
+                if "search" in app_name.lower() or "browser" in description.lower() or "search engine" in description.lower():
+                    is_browser = await classify_browser(app_name, description)
+                    if is_browser:
+                        category = "BROWSER"
 
         # 2. Insert into DB
         if supabase:
