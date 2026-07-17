@@ -19,50 +19,17 @@ from .apps import (
     get_profile,
     get_user_from_token,
     update_profile,
+    update_profile_by_customer,
     supabase_admin,
 )
 
-# ── Subscription table helpers ────────────────────────────────────────────────
-
-def get_subscription(user_id: str) -> Optional[dict]:
-    """Fetch the subscription row for a given user_id."""
-    client = supabase_admin
-    if not client:
-        return None
-    res = client.table("subscription").select("*").eq("user_id", user_id).maybe_single().execute()
-    return res.data if res else None
-
-
-def upsert_subscription(user_id: str, values: dict) -> None:
-    """Insert or update the subscription row for a user_id."""
-    client = supabase_admin
-    if not client:
-        print(f"WARNING: No Supabase client available to upsert subscription for user {user_id}.")
-        return
-    payload = {"user_id": user_id, **values}
-    # Try update first; if no row exists yet, insert.
-    res = client.table("subscription").update(values).eq("user_id", user_id).execute()
-    if not res.data:
-        res = client.table("subscription").insert(payload).execute()
-        if not res.data:
-            print(f"WARNING: Failed to upsert subscription for user {user_id}.")
-
-
-def upsert_subscription_by_customer(customer_id: str, values: dict) -> None:
-    """Update the subscription row that matches a stripe_customer_id."""
-    client = supabase_admin
-    if not client:
-        print(f"WARNING: No Supabase client available to update subscription for customer {customer_id}.")
-        return
-    res = client.table("subscription").update(values).eq("stripe_customer_id", customer_id).execute()
-    if not res.data:
-        print(f"WARNING: Failed to update subscription for customer {customer_id}. Row may not exist yet.")
+# ── Profile helpers for Stripe ────────────────────────────────────────────────
 
 
 def get_stripe_customer_id(user_id: str) -> Optional[str]:
-    """Quick lookup of stripe_customer_id from the subscription table."""
-    sub = get_subscription(user_id)
-    return sub.get("stripe_customer_id") if sub else None
+    """Quick lookup of stripe_customer_id from the profiles table."""
+    profile = get_profile(user_id)
+    return profile.get("stripe_customer_id") if profile else None
 
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
@@ -110,7 +77,7 @@ def _ensure_customer(user) -> str:
         email=user.email,
         metadata={"supabase_user_id": user.id},
     )
-    upsert_subscription(user.id, {"stripe_customer_id": customer.id})
+    update_profile(user.id, {"stripe_customer_id": customer.id})
     return customer.id
 
 
@@ -134,6 +101,7 @@ def create_checkout(body: CheckoutBody):
         success_url=f"{FRONTEND_URL}/success?session_id={{CHECKOUT_SESSION_ID}}",
         cancel_url=f"{FRONTEND_URL}/#pricing",
         metadata={"plan": body.plan},
+        subscription_data={"trial_period_days": 14},
     )
     return {"url": session.url}
 
@@ -153,9 +121,9 @@ def create_checkout_authenticated(body: CheckoutBody, authorization: str | None 
         client_reference_id=user.id,
         line_items=[{"price": price_id, "quantity": body.seats}],
         success_url=f"{FRONTEND_URL}/success?session_id={{CHECKOUT_SESSION_ID}}&auth=true",
-        cancel_url=f"{FRONTEND_URL}/account",
+        cancel_url=f"{FRONTEND_URL}/dashboard/account",
         metadata={"supabase_user_id": user.id, "plan": body.plan},
-        subscription_data={"metadata": {"supabase_user_id": user.id}},
+        subscription_data={"metadata": {"supabase_user_id": user.id}, "trial_period_days": 14},
     )
     return {"url": session.url}
 
@@ -169,13 +137,13 @@ def create_portal(authorization: str | None = Header(default=None)):
 
     session = stripe.billing_portal.Session.create(
         customer=customer_id,
-        return_url=f"{FRONTEND_URL}/account",
+        return_url=f"{FRONTEND_URL}/dashboard/account",
     )
     return {"url": session.url}
 
 
 def _apply_subscription(subscription, override_user_id=None) -> None:
-    """Sync a Stripe subscription object onto the subscription table."""
+    """Sync a Stripe subscription object onto the profiles table."""
     customer_id = getattr(subscription, "customer", None)
     status = getattr(subscription, "status", None)  # active | canceled | past_due | ...
 
@@ -188,28 +156,21 @@ def _apply_subscription(subscription, override_user_id=None) -> None:
             price_id = getattr(price, "id", None)
 
     period_end = getattr(subscription, "current_period_end", None)
-    canceled_at = getattr(subscription, "canceled_at", None)
 
     values = {
-        "status": status,
+        "subscription_status": status,
         "stripe_subscription_id": getattr(subscription, "id", None),
         "stripe_customer_id": customer_id,
+        "cancel_at_period_end": getattr(subscription, "cancel_at_period_end", False),
     }
     if price_id in PRICE_TO_PLAN:
         values["plan"] = PRICE_TO_PLAN[price_id]
     if period_end:
-        values["subscription_end_date"] = datetime.fromtimestamp(
+        values["current_period_end"] = datetime.fromtimestamp(
             period_end, tz=timezone.utc
             ).isoformat()
     else:
-        values["subscription_end_date"] = None
-
-    if canceled_at:
-        values["canceled_at_date"] = datetime.fromtimestamp(
-            canceled_at, tz=timezone.utc
-            ).isoformat()
-    else:
-        values["canceled_at_date"] = None
+        values["current_period_end"] = None
 
     # Prefer the explicit user id (passed in or set on the subscription metadata) and fall
     # back to matching on the Stripe customer id.
@@ -218,9 +179,9 @@ def _apply_subscription(subscription, override_user_id=None) -> None:
     user_id = override_user_id or metadata_user_id
 
     if user_id:
-        upsert_subscription(user_id, values)
+        update_profile(user_id, values)
     elif customer_id:
-        upsert_subscription_by_customer(customer_id, values)
+        update_profile_by_customer(customer_id, values)
     else:
         print("DEBUG _apply_subscription: No user_id or customer_id found to update!")
 
@@ -247,13 +208,10 @@ def _get_or_create_supabase_user(email: str, stripe_customer_id: str) -> str | N
 
         print(f"Created Supabase user {user.id} for {email}")
 
-        # Seed the profile with terms acceptance.
+        # Seed the profile with Stripe customer ID.
         update_profile(user.id, {
-            "terms_accepted_at": datetime.now(timezone.utc).isoformat(),
-            "terms_version": "2026-06-29",
+            "stripe_customer_id": stripe_customer_id,
         })
-        # Seed the subscription table with the Stripe customer id.
-        upsert_subscription(user.id, {"stripe_customer_id": stripe_customer_id})
         return user.id
     except Exception as e:
         err = str(e).lower()
