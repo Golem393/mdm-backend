@@ -362,15 +362,15 @@ def verify_user_credentials(email, password):
     if not user:
         raise Exception("Authentication failed")
         
-    res = temp_client.table("subscription").select("*").eq("user_id", user.id).maybe_single().execute()
-    subscription = res.data
+    res = temp_client.table("profiles").select("*").eq("id", user.id).maybe_single().execute()
+    profile = res.data
     
-    if not subscription:
-        raise Exception("User subscription not found")
+    if not profile:
+        raise Exception("User profile not found")
         
-    status = subscription.get("status")
-    if status != "active":
-        raise Exception("Active subscription required. Please manage your plan.")
+    status = profile.get("subscription_status")
+    if status not in ("active", "trialing"):
+        raise Exception("Active subscription or free trial required. Please manage your plan.")
         
     return True
 
