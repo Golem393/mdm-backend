@@ -16,7 +16,7 @@ from typing import Optional
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from routers.apps import supabase, get_user_from_token, get_profile
+from routers.apps import supabase, supabase_admin, get_user_from_token, get_profile
 
 router = APIRouter()
 
@@ -37,13 +37,23 @@ def _require_user(authorization: Optional[str]):
     return user
 
 
+def _admin():
+    """Service-role client for schedule/device writes. These tables' RLS policies only
+    grant `select` to their owner (see the migration) — the plain anon/user-keyed
+    `supabase` client can authenticate a bearer token but can't write here, same as
+    `get_profile`/`update_profile` in apps.py."""
+    if not supabase_admin:
+        raise HTTPException(status_code=503, detail="Supabase service role not configured")
+    return supabase_admin
+
+
 def _get_schedule(user_id: str) -> Optional[dict]:
-    res = supabase.table("schedules").select("*").eq("user_id", user_id).maybe_single().execute()
+    res = _admin().table("schedules").select("*").eq("user_id", user_id).maybe_single().execute()
     return res.data if res else None
 
 
 def _get_device(user_id: str) -> Optional[dict]:
-    res = supabase.table("devices").select("*").eq("user_id", user_id).maybe_single().execute()
+    res = _admin().table("devices").select("*").eq("user_id", user_id).maybe_single().execute()
     return res.data if res else None
 
 
@@ -101,7 +111,7 @@ async def create_schedule(body: ScheduleCreate, authorization: Optional[str] = H
     payload["user_id"] = user.id
 
     try:
-        res = supabase.table("schedules").insert(payload).execute()
+        res = _admin().table("schedules").insert(payload).execute()
     except Exception as e:
         # The UNIQUE index on user_id is the real guard against a double-submit racing
         # past the check above.
@@ -125,7 +135,8 @@ async def mark_schedule_pushed(schedule_id: str, authorization: Optional[str] = 
     # Send a concrete timestamp rather than "now()" — PostgREST passes the value through
     # as a literal, and 'now()' is not a valid timestamptz literal.
     res = (
-        supabase.table("schedules")
+        _admin()
+        .table("schedules")
         .update({
             "status": "pushed",
             "pushed_at": datetime.now(timezone.utc).isoformat(),
@@ -154,7 +165,7 @@ async def register_device(body: DeviceCreate, authorization: Optional[str] = Hea
         )
 
     try:
-        res = supabase.table("devices").insert({
+        res = _admin().table("devices").insert({
             "user_id": user.id,
             "serial": body.serial,
             "model": body.model,
@@ -184,5 +195,5 @@ async def unregister_device(serial: str, authorization: Optional[str] = Header(N
             detail="Removal is not enabled for this account. Contact support to request it.",
         )
 
-    supabase.table("devices").delete().eq("user_id", user.id).eq("serial", serial).execute()
+    _admin().table("devices").delete().eq("user_id", user.id).eq("serial", serial).execute()
     return {"success": True}

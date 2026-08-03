@@ -47,8 +47,9 @@ create table if not exists devices (
 
 create unique index if not exists devices_one_per_user on devices (user_id);
 
--- RLS: the backend uses the service key and bypasses these, but they matter if the website
--- or any client ever reads these tables directly with a user token.
+-- RLS: read-only policies for the owner. The backend writes through the service-role client
+-- (SUPABASE_SERVICE_ROLE_KEY), which bypasses RLS — so no insert/update/delete policies are
+-- needed here, and their absence is deliberate: it keeps clients from writing directly.
 alter table schedules enable row level security;
 alter table devices   enable row level security;
 

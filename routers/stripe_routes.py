@@ -17,6 +17,7 @@ from typing import Optional
 import os
 from .apps import (
     get_profile,
+    get_profile_by_customer,
     get_user_from_token,
     update_profile,
     update_profile_by_customer,
@@ -208,9 +209,13 @@ def _get_or_create_supabase_user(email: str, stripe_customer_id: str) -> str | N
 
         print(f"Created Supabase user {user.id} for {email}")
 
-        # Seed the profile with Stripe customer ID.
+        # Seed the profile with the Stripe customer id, and record that this user owes a
+        # create-password email. The flag is what makes a webhook retry recoverable: it
+        # survives the 5xx that a failed send raises, so the next attempt still knows to
+        # send even though the user is no longer "new".
         update_profile(user.id, {
             "stripe_customer_id": stripe_customer_id,
+            "password_email_pending": True,
         })
         return user.id
     except Exception as e:
@@ -297,7 +302,39 @@ If you have any questions, just reply to this email and we'll be happy to help.
             server.send_message(msg)
         print(f"Create-password email sent to {to_email}")
     except Exception as e:
+        # Must propagate. Swallowing this returns 200 to Stripe, so the webhook is never
+        # retried and the customer — who has already paid — is left with an account they
+        # have no password for and no way to obtain one.
         print(f"ERROR sending create-password email to {to_email}: {e}")
+        raise
+
+
+def _deliver_password_email_once(to_email: str, stripe_customer_id: str) -> None:
+    """Send the create-password email, at most once, to a customer who still owes one.
+
+    Deliberately keyed on the persisted `password_email_pending` flag rather than on
+    whether *this* webhook attempt created the user. Stripe retries after a 5xx, and on
+    the retry the user already exists — an is-new-user gate is therefore false on every
+    attempt except the one that failed, so the mail would never be sent at all.
+
+    The flag is cleared only after a successful send, which makes the whole step
+    idempotent: retries resend until it works, and never double-send afterwards.
+    """
+    profile = get_profile_by_customer(stripe_customer_id)
+    if profile is None:
+        # No profile to reason about — most likely a pre-existing customer whose row
+        # isn't keyed to this Stripe customer yet. Sending a password-reset mail to
+        # someone who never asked for one is worse than sending nothing.
+        print(f"No profile for customer {stripe_customer_id}; skipping create-password email.")
+        return
+
+    if not profile.get("password_email_pending"):
+        # Either already delivered, or an existing account that set its own password.
+        return
+
+    _send_create_password_email(to_email)
+
+    update_profile_by_customer(stripe_customer_id, {"password_email_pending": False})
 
 
 @router.post("/webhook")
@@ -326,11 +363,8 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(defaul
 
         # --- Create (or look up) the Supabase user from the purchaser's email ---
         user_id = None
-        is_new_user = False
         if to_email and stripe_customer_id:
             user_id = _get_or_create_supabase_user(to_email, stripe_customer_id)
-            if user_id:
-                is_new_user = True
         elif to_email:
             print(f"WARNING: No stripe_customer_id on checkout session for {to_email}")
 
@@ -338,10 +372,15 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(defaul
             subscription = stripe.Subscription.retrieve(sub_id)
             _apply_subscription(subscription, override_user_id=user_id)
 
-        if to_email and is_new_user:
+        # Sync the subscription before the email, so a failure here leaves the customer
+        # correctly subscribed and merely awaiting their password link — recoverable —
+        # rather than emailed but unsubscribed.
+        if to_email and stripe_customer_id:
             try:
-                _send_create_password_email(to_email)
+                _deliver_password_email_once(to_email, stripe_customer_id)
             except Exception as e:
+                # 500 asks Stripe to retry. Safe now: _apply_subscription is idempotent and
+                # the pending flag is still set, so the retry resumes at the email.
                 print(f"CRITICAL: Failed to handle post-checkout email for {to_email}: {e}")
                 raise HTTPException(status_code=500, detail="Failed to send create-password email.")
         elif not to_email:
