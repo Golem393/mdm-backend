@@ -12,6 +12,7 @@ from email.message import EmailMessage
 import stripe
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
+from typing import Optional
 
 import os
 from .apps import (
@@ -19,7 +20,17 @@ from .apps import (
     get_user_from_token,
     update_profile,
     update_profile_by_customer,
+    supabase_admin,
 )
+
+# ── Profile helpers for Stripe ────────────────────────────────────────────────
+
+
+def get_stripe_customer_id(user_id: str) -> Optional[str]:
+    """Quick lookup of stripe_customer_id from the profiles table."""
+    profile = get_profile(user_id)
+    return profile.get("stripe_customer_id") if profile else None
+
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
@@ -58,8 +69,7 @@ def _authed_user(authorization: str | None):
 
 def _ensure_customer(user) -> str:
     """Return the user's Stripe customer id, creating + persisting one if needed."""
-    profile = get_profile(user.id) or {}
-    customer_id = profile.get("stripe_customer_id")
+    customer_id = get_stripe_customer_id(user.id)
     if customer_id:
         return customer_id
 
@@ -73,10 +83,32 @@ def _ensure_customer(user) -> str:
 
 class CheckoutBody(BaseModel):
     plan: str  # "monthly" | "yearly"
+    seats: int = 1
 
 
 @router.post("/checkout")
-def create_checkout(body: CheckoutBody, authorization: str | None = Header(default=None)):
+def create_checkout(body: CheckoutBody):
+    """Anonymous checkout — no auth required. The webhook creates the Supabase
+    user after the payment succeeds (checkout.session.completed)."""
+    price_id = PLAN_TO_PRICE.get(body.plan)
+    print(price_id)
+    if not price_id:
+        raise HTTPException(status_code=400, detail="Unknown plan.")
+
+    session = stripe.checkout.Session.create(
+        mode="subscription",
+        line_items=[{"price": price_id, "quantity": body.seats}],
+        success_url=f"{FRONTEND_URL}/success?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{FRONTEND_URL}/#pricing",
+        metadata={"plan": body.plan},
+        subscription_data={"trial_period_days": 14},
+    )
+    return {"url": session.url}
+
+
+@router.post("/checkout/authenticated")
+def create_checkout_authenticated(body: CheckoutBody, authorization: str | None = Header(default=None)):
+    """Authenticated checkout — for logged-in users starting/changing a plan."""
     user = _authed_user(authorization)
     price_id = PLAN_TO_PRICE.get(body.plan)
     if not price_id:
@@ -87,11 +119,11 @@ def create_checkout(body: CheckoutBody, authorization: str | None = Header(defau
         mode="subscription",
         customer=customer_id,
         client_reference_id=user.id,
-        line_items=[{"price": price_id, "quantity": 1}],
-        success_url=f"{FRONTEND_URL}/success?session_id={{CHECKOUT_SESSION_ID}}",
-        cancel_url=f"{FRONTEND_URL}/onboarding?plan={body.plan}",
+        line_items=[{"price": price_id, "quantity": body.seats}],
+        success_url=f"{FRONTEND_URL}/success?session_id={{CHECKOUT_SESSION_ID}}&auth=true",
+        cancel_url=f"{FRONTEND_URL}/dashboard/account",
         metadata={"supabase_user_id": user.id, "plan": body.plan},
-        subscription_data={"metadata": {"supabase_user_id": user.id}},
+        subscription_data={"metadata": {"supabase_user_id": user.id}, "trial_period_days": 14},
     )
     return {"url": session.url}
 
@@ -99,23 +131,22 @@ def create_checkout(body: CheckoutBody, authorization: str | None = Header(defau
 @router.post("/portal")
 def create_portal(authorization: str | None = Header(default=None)):
     user = _authed_user(authorization)
-    profile = get_profile(user.id) or {}
-    customer_id = profile.get("stripe_customer_id")
+    customer_id = get_stripe_customer_id(user.id)
     if not customer_id:
         raise HTTPException(status_code=400, detail="No billing account yet.")
 
     session = stripe.billing_portal.Session.create(
         customer=customer_id,
-        return_url=f"{FRONTEND_URL}/account",
+        return_url=f"{FRONTEND_URL}/dashboard/account",
     )
     return {"url": session.url}
 
 
 def _apply_subscription(subscription, override_user_id=None) -> None:
-    """Sync a Stripe subscription object onto the matching profile row."""
+    """Sync a Stripe subscription object onto the profiles table."""
     customer_id = getattr(subscription, "customer", None)
     status = getattr(subscription, "status", None)  # active | canceled | past_due | ...
-    
+
     items = getattr(subscription, "items", None)
     data = getattr(items, "data", []) if items else []
     price_id = None
@@ -123,27 +154,30 @@ def _apply_subscription(subscription, override_user_id=None) -> None:
         price = getattr(data[0], "price", None)
         if price:
             price_id = getattr(price, "id", None)
-            
+
     period_end = getattr(subscription, "current_period_end", None)
 
     values = {
         "subscription_status": status,
         "stripe_subscription_id": getattr(subscription, "id", None),
+        "stripe_customer_id": customer_id,
+        "cancel_at_period_end": getattr(subscription, "cancel_at_period_end", False),
     }
     if price_id in PRICE_TO_PLAN:
         values["plan"] = PRICE_TO_PLAN[price_id]
     if period_end:
         values["current_period_end"] = datetime.fromtimestamp(
             period_end, tz=timezone.utc
-        ).isoformat()
-
+            ).isoformat()
+    else:
+        values["current_period_end"] = None
 
     # Prefer the explicit user id (passed in or set on the subscription metadata) and fall
     # back to matching on the Stripe customer id.
     metadata = getattr(subscription, "metadata", {}) or {}
     metadata_user_id = metadata.get("supabase_user_id") if isinstance(metadata, dict) else getattr(metadata, "supabase_user_id", None)
     user_id = override_user_id or metadata_user_id
-    
+
     if user_id:
         update_profile(user_id, values)
     elif customer_id:
@@ -152,41 +186,118 @@ def _apply_subscription(subscription, override_user_id=None) -> None:
         print("DEBUG _apply_subscription: No user_id or customer_id found to update!")
 
 
-def _send_setup_email(to_email: str):
+def _get_or_create_supabase_user(email: str, stripe_customer_id: str) -> str | None:
+    """
+    Attempt to create a new Supabase user for *email*.
+    If the user already exists, Supabase raises an error — we catch it and
+    return None so _apply_subscription falls back to matching by stripe_customer_id.
+    """
+    if not supabase_admin:
+        print("WARNING: supabase_admin not configured — cannot create user.")
+        return None
+
+    try:
+        response = supabase_admin.auth.admin.create_user({
+            "email": email,
+            "email_confirm": True,  # mark email as confirmed immediately
+        })
+        user = response.user
+        if not user:
+            print(f"ERROR: create_user returned no user for {email}")
+            return None
+
+        print(f"Created Supabase user {user.id} for {email}")
+
+        # Seed the profile with Stripe customer ID.
+        update_profile(user.id, {
+            "stripe_customer_id": stripe_customer_id,
+        })
+        return user.id
+    except Exception as e:
+        err = str(e).lower()
+        if "already" in err or "exists" in err or "registered" in err:
+            # User already has an account — subscription will be matched via
+            # stripe_customer_id in _apply_subscription.
+            print(f"User already exists for {email}, skipping creation.")
+        else:
+            print(f"ERROR: Failed to create Supabase user for {email}: {e}")
+        return None
+
+
+def _send_create_password_email(to_email: str) -> None:
+    """Send a 'create your password' email containing a Supabase magic link
+    that exchanges for a session and lands the user on /update-password."""
     if not SMTP_USERNAME or not SMTP_PASSWORD:
-        print("WARNING: SMTP credentials not set, cannot send setup email.")
+        print("WARNING: SMTP credentials not set, cannot send create-password email.")
         return
 
+    # Generate a recovery / password-reset link via the admin API.
+    # Supabase will construct a link that, when clicked, exchanges for a
+    # session (via PKCE code) and redirects to redirect_to.
+    magic_link = None
+    if supabase_admin:
+        try:
+            res = supabase_admin.auth.admin.generate_link({
+                "type": "recovery",
+                "email": to_email,
+                "options": {
+                    "redirect_to": f"{FRONTEND_URL}/update-password",
+                },
+            })
+            # The link lives in res.properties.action_link
+            props = getattr(res, "properties", None)
+            magic_link = getattr(props, "action_link", None)
+        except Exception as e:
+            print(f"WARNING: Could not generate magic link for {to_email}: {e}")
+
+    if not magic_link:
+        raise ValueError(f"Failed to generate magic link for {to_email}")
+
     msg = EmailMessage()
-    msg['Subject'] = "Welcome to Skyward"
+    msg['Subject'] = "Create your Skyward password"
     msg['From'] = SMTP_FROM_EMAIL
     msg['To'] = to_email
 
-    content = """Hi,
+    content = f"""Hi,
 
-Welcome to Skyward.
+Welcome to Skyward — your subscription is now active!
 
-Your subscription is now active and you're ready to begin setup.
+To get started, you'll first need to create a password for your account.
+Click the link below to set your password (the link expires in 24 hours):
 
-To get started, please use the link below:
+{magic_link}
 
-https://skywardos.com/setup
+Once you've created your password you'll be taken straight to setup,
+where we'll walk you through everything before installing Skyward.
 
-The setup guide will walk you through everything you need to do before installing Skyward, including important steps to help protect your data.
-
-If you have any questions or run into any issues during setup, simply reply to this email and we'll be happy to help.
+If you have any questions, just reply to this email and we'll be happy to help.
 
 — The Skyward Team"""
     msg.set_content(content)
+
+    html_content = f"""<html>
+  <body>
+    <p>Hi,</p>
+    <p>Welcome to Skyward — your subscription is now active!</p>
+    <p>To get started, you'll first need to create a password for your account.<br>
+    Click the link below to set your password (the link expires in 24 hours):</p>
+    <p><a href="{magic_link}">Create password</a></p>
+    <p>Once you've created your password you'll be taken straight to setup,<br>
+    where we'll walk you through everything before installing Skyward.</p>
+    <p>If you have any questions, just reply to this email and we'll be happy to help.</p>
+    <p>— The Skyward Team</p>
+  </body>
+</html>"""
+    msg.add_alternative(html_content, subtype='html')
 
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
             server.starttls()
             server.login(SMTP_USERNAME, SMTP_PASSWORD)
             server.send_message(msg)
-        print(f"Setup email sent successfully to {to_email}")
+        print(f"Create-password email sent to {to_email}")
     except Exception as e:
-        print(f"Error sending setup email to {to_email}: {e}")
+        print(f"ERROR sending create-password email to {to_email}: {e}")
 
 
 @router.post("/webhook")
@@ -205,22 +316,36 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(defaul
     if kind == "checkout.session.completed":
         # Fetch the full subscription so we get status / period / price.
         sub_id = getattr(obj, "subscription", None)
+        
+        customer_details = getattr(obj, "customer_details", {}) or {}
+        to_email = (
+            customer_details.get("email") if isinstance(customer_details, dict)
+            else getattr(customer_details, "email", None)
+        )
+        stripe_customer_id = getattr(obj, "customer", None)
+
+        # --- Create (or look up) the Supabase user from the purchaser's email ---
+        user_id = None
+        is_new_user = False
+        if to_email and stripe_customer_id:
+            user_id = _get_or_create_supabase_user(to_email, stripe_customer_id)
+            if user_id:
+                is_new_user = True
+        elif to_email:
+            print(f"WARNING: No stripe_customer_id on checkout session for {to_email}")
+
         if sub_id:
             subscription = stripe.Subscription.retrieve(sub_id)
-            # Carry the user id from the checkout session metadata.
-            metadata = getattr(obj, "metadata", {}) or {}
-            checkout_user_id = (
-                metadata.get("supabase_user_id") if isinstance(metadata, dict) else getattr(metadata, "supabase_user_id", None)
-            ) or getattr(obj, "client_reference_id", None)
-            
-            _apply_subscription(subscription, override_user_id=checkout_user_id)
-            
-            customer_details = getattr(obj, "customer_details", {}) or {}
-            to_email = customer_details.get("email") if isinstance(customer_details, dict) else getattr(customer_details, "email", None)
-            if to_email:
-                _send_setup_email(to_email)
-            else:
-                print("WARNING: Could not find email in checkout session to send setup email.")
+            _apply_subscription(subscription, override_user_id=user_id)
+
+        if to_email and is_new_user:
+            try:
+                _send_create_password_email(to_email)
+            except Exception as e:
+                print(f"CRITICAL: Failed to handle post-checkout email for {to_email}: {e}")
+                raise HTTPException(status_code=500, detail="Failed to send create-password email.")
+        elif not to_email:
+            print("WARNING: Could not find email in checkout session to send create-password email.")
     elif kind in ("customer.subscription.updated", "customer.subscription.deleted"):
         _apply_subscription(obj)
 
