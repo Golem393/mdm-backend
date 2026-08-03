@@ -2,6 +2,7 @@ import os
 import csv
 import asyncio
 import time
+from typing import Optional
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from google_play_scraper import app as get_app_info
@@ -213,40 +214,43 @@ class SetupAuthRequest(BaseModel):
 def verify_user_credentials(email, password):
     if not create_client or not supabase_url or not supabase_key:
         raise Exception("Supabase client not configured")
-        
+
     temp_client = create_client(supabase_url, supabase_key)
     auth_response = temp_client.auth.sign_in_with_password({
-        "email": email, 
+        "email": email,
         "password": password
     })
-    
+
     user = auth_response.user
     if not user:
         raise Exception("Authentication failed")
-        
+
     res = temp_client.table("profiles").select("*").eq("id", user.id).maybe_single().execute()
     profile = res.data
-    
+
     if not profile:
         raise Exception("User profile not found")
-        
+
     status = profile.get("subscription_status")
     if status != "active":
         raise Exception("Active subscription required. Please manage your plan.")
-        
-    return True
+
+    # Hand the session token back so the desktop companion can authenticate its
+    # subsequent /api/me, /api/schedule and /api/devices calls as this user.
+    session = getattr(auth_response, "session", None)
+    return getattr(session, "access_token", None) if session else None
 
 @router.post('/setup-auth')
 async def setup_auth(request: SetupAuthRequest):
     loop = asyncio.get_running_loop()
     try:
-        await loop.run_in_executor(
-            None, 
-            verify_user_credentials, 
-            request.email, 
+        access_token = await loop.run_in_executor(
+            None,
+            verify_user_credentials,
+            request.email,
             request.password
         )
-        return {"success": True}
+        return {"success": True, "accessToken": access_token}
     except Exception as e:
         print(f"Error in /setup-auth: {e}")
         msg = str(e)
