@@ -30,11 +30,13 @@ async def get_api_key(api_key: str = Security(api_key_header)):
 # Import routers
 from routers import devices
 from routers import apps
+from routers import schedules
 from routers import stripe_routes
 
 # Register routes to the root (/) requiring the API Key
 app.include_router(devices.router, prefix="/api", dependencies=[Depends(get_api_key)])
 app.include_router(apps.router, prefix="/api", dependencies=[Depends(get_api_key)])
+app.include_router(schedules.router, prefix="/api", dependencies=[Depends(get_api_key)])
 app.include_router(stripe_routes.router, prefix="/api/stripe")
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ import os
 import csv
 import asyncio
 import time
+from typing import Optional
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from google_play_scraper import app as get_app_info
@@ -83,6 +84,61 @@ async def classify_video_player(app_name: str, description: str) -> str:
     except Exception as e:
         print(f"LLM Classification error for {app_name}: {e}")
         return "VIDEO_PLAYERS_ENTERTAINMENT"
+
+
+# Cheap pre-filter for the browser check. The Play Store has no browser genre, so browsers
+# land under TOOLS/COMMUNICATION alongside thousands of harmless utilities — asking the LLM
+# about every one of them would be slow and expensive. These substrings are the ones worth
+# paying for a classification on.
+_BROWSER_HINTS_IN_NAME = ("search",)
+_BROWSER_HINTS_IN_DESCRIPTION = ("browser", "search engine")
+
+
+def _might_be_browser(app_name: str, description: str) -> bool:
+    name = (app_name or "").lower()
+    desc = (description or "").lower()
+    return (
+        any(hint in name for hint in _BROWSER_HINTS_IN_NAME)
+        or any(hint in desc for hint in _BROWSER_HINTS_IN_DESCRIPTION)
+    )
+
+
+async def classify_browser(app_name: str, description: str) -> bool:
+    """True if the app is a web browser or search engine.
+
+    Browsers defeat category blocking entirely — anything blocked as an app is reachable
+    through them on the web — so they get their own synthetic BROWSER category, which the
+    Android client already carries in its blocked set.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("OPENAI_API_KEY not set. Defaulting to False for browser classification.")
+        return False
+
+    try:
+        client = openai.AsyncOpenAI(api_key=api_key)
+        short_desc = (description or "")[:500]  # Truncate to save tokens
+        prompt = (
+            f"App Name: {app_name}\nDescription: {short_desc}\n\n"
+            "Based on the name and description, is this application primarily a web "
+            "browser or a web search engine (like Google Search, Yahoo Search, Bing, "
+            "etc.)? Reply with ONLY 'Yes' or 'No'."
+        )
+
+        response = await client.chat.completions.create(
+            model="gpt-5-nano",
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        result = response.choices[0].message.content.strip()
+        print(f"[DEBUG] LLM browser classification for '{app_name}': {result}")
+        return result.lower().startswith("yes")
+    except Exception as e:
+        # Fail open: a misclassified browser is recoverable, a hard error on every app
+        # lookup is not.
+        print(f"LLM Classification error for {app_name}: {e}")
+        return False
+
 
 def insert_supabase(package_name, app_name, category):
     if not supabase: return
@@ -195,7 +251,12 @@ async def get_app_category(request: AppCategoryRequest):
             
             if category == 'VIDEO_PLAYERS':
                 category = await classify_video_player(app_name, description)
-        
+
+            # TODO better browser filtering method
+            if _might_be_browser(app_name, description):
+                if await classify_browser(app_name, description):
+                    category = "BROWSER"
+
         # 2. Insert into DB
         if supabase:
             loop.run_in_executor(None, insert_supabase, package_name, app_name, category)
@@ -233,20 +294,23 @@ def verify_user_credentials(email, password):
     status = profile.get("subscription_status")
     if status != "active":
         raise Exception("Active subscription required. Please manage your plan.")
-        
-    return True
+
+    # Hand the session token back so the desktop companion can authenticate its
+    # subsequent /api/me, /api/schedule and /api/devices calls as this user.
+    session = getattr(auth_response, "session", None)
+    return getattr(session, "access_token", None) if session else None
 
 @router.post('/setup-auth')
 async def setup_auth(request: SetupAuthRequest):
     loop = asyncio.get_running_loop()
     try:
-        await loop.run_in_executor(
-            None, 
-            verify_user_credentials, 
-            request.email, 
+        access_token = await loop.run_in_executor(
+            None,
+            verify_user_credentials,
+            request.email,
             request.password
         )
-        return {"success": True}
+        return {"success": True, "accessToken": access_token}
     except Exception as e:
         print(f"Error in /setup-auth: {e}")
         msg = str(e)
