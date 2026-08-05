@@ -177,6 +177,29 @@ async def register_device(body: DeviceCreate, authorization: Optional[str] = Hea
     return res.data[0]
 
 
+@router.post("/devices/{serial}/finalized")
+async def mark_device_finalized(serial: str, authorization: Optional[str] = Header(None)):
+    """Record that USB debugging was successfully sealed on this device.
+
+    A device row left with finalized = false is a phone that is provisioned but still
+    ADB-reachable — anyone can broadcast CLEAR_OWNER and uninstall it. Support can list
+    those with:
+        select serial, enrolled_at from devices where not finalized;
+    """
+    user = _require_user(authorization)
+
+    res = (
+        supabase.table("devices")
+        .update({"finalized": True})
+        .eq("serial", serial)
+        .eq("user_id", user.id)
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Device not found")
+    return res.data[0]
+
+
 @router.delete("/devices/{serial}")
 async def unregister_device(serial: str, authorization: Optional[str] = Header(None)):
     """Drop the device record after removal. Gated on profiles.remove_enabled."""
