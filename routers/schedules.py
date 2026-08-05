@@ -2,8 +2,8 @@
 
 Supabase is the record of truth for the parent's single schedule and single enrolled
 device. The phone still enforces offline from its own SharedPreferences copy — this is
-purely so the desktop app has somewhere durable to read state back from, since USB
-debugging is sealed after enrolment and the schedule can no longer be read off the device.
+purely so the desktop app has somewhere durable to read state back from, since the
+schedule can't be read back off the device.
 
 Schedules are immutable: there is deliberately no update or delete route. Parents who need
 a change email support, who edit the row directly in Supabase. Removing the app is gated
@@ -174,29 +174,6 @@ async def register_device(body: DeviceCreate, authorization: Optional[str] = Hea
 
     if not res.data:
         raise HTTPException(status_code=500, detail="Could not register device")
-    return res.data[0]
-
-
-@router.post("/devices/{serial}/finalized")
-async def mark_device_finalized(serial: str, authorization: Optional[str] = Header(None)):
-    """Record that USB debugging was successfully sealed on this device.
-
-    A device row left with finalized = false is a phone that is provisioned but still
-    ADB-reachable — anyone can broadcast CLEAR_OWNER and uninstall it. Support can list
-    those with:
-        select serial, enrolled_at from devices where not finalized;
-    """
-    user = _require_user(authorization)
-
-    res = (
-        supabase.table("devices")
-        .update({"finalized": True})
-        .eq("serial", serial)
-        .eq("user_id", user.id)
-        .execute()
-    )
-    if not res.data:
-        raise HTTPException(status_code=404, detail="Device not found")
     return res.data[0]
 
 
