@@ -286,7 +286,7 @@ def verify_user_credentials(email, password):
         raise Exception("Authentication failed")
         
     res = temp_client.table("profiles").select("*").eq("id", user.id).maybe_single().execute()
-    profile = res.data
+    profile = res.data if res else None
     
     if not profile:
         raise Exception("User profile not found")
