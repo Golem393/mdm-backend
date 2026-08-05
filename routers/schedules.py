@@ -5,9 +5,15 @@ device. The phone still enforces offline from its own SharedPreferences copy —
 purely so the desktop app has somewhere durable to read state back from, since the
 schedule can't be read back off the device.
 
-Schedules are immutable: there is deliberately no update or delete route. Parents who need
-a change email support, who edit the row directly in Supabase. Removing the app is gated
-behind profiles.remove_enabled, which only support can flip.
+Schedules are immutable while active: there is deliberately no update or delete route a
+parent can call directly. A parent who needs an active schedule changed emails support,
+who edits the row directly in Supabase. Removing the app is gated behind
+profiles.remove_enabled, which only support can flip.
+
+The one exception is expiry: once `active_until` is in the past, the schedule is spent —
+the phone has already unblocked itself — so it's lazily deleted the next time it's read
+(`_get_schedule`, below), which is what lets a parent set up a fresh one. This isn't a
+client-facing update/delete; it only ever fires from the backend's own read path.
 
 Uses the same module-level `supabase` client as the rest of the backend — no separate
 admin client. That means SUPABASE_KEY must be the service-role key, which is already the
@@ -42,9 +48,19 @@ def _require_user(authorization: Optional[str]):
     return user
 
 
+def _is_expired(schedule: dict) -> bool:
+    return datetime.fromisoformat(schedule["active_until"]) <= datetime.now(timezone.utc)
+
+
 def _get_schedule(user_id: str) -> Optional[dict]:
+    """The account's schedule, or None — expired schedules are deleted here so they don't
+    linger in the DB and so the caller sees "no schedule" and can create a new one."""
     res = supabase.table("schedules").select("*").eq("user_id", user_id).maybe_single().execute()
-    return res.data if res else None
+    schedule = res.data if res else None
+    if schedule and _is_expired(schedule):
+        supabase.table("schedules").delete().eq("id", schedule["id"]).eq("user_id", user_id).execute()
+        return None
+    return schedule
 
 
 def _get_device(user_id: str) -> Optional[dict]:
