@@ -148,8 +148,8 @@ def insert_supabase(package_name, app_name, category):
             "category": category
         }
         if app_name:
-            data["appname"] = app_name
-            
+            data["appName"] = app_name
+
         supabase.table('app_categories').insert(data).execute()
     except Exception as e:
         print(f"Supabase insert error: {e}")
