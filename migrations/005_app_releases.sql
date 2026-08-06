@@ -66,16 +66,16 @@ begin;
 
 insert into app_releases (version_code, version_name, storage_path, sha256, size_bytes, release_notes)
 values (
-  2,
-  '1.2',
-  'skywardblocker-2.apk',
-  'fd7ed17268e81ba03cb876f1b1a1c1417416e824b0ade20d90b81112c6b5e0f2',
+  3,
+  '1.3',
+  'skywardblocker-3.apk',
+  '615f1958a11872b3ec79530365371db346d54af52c4c292be40b803bc95a525e',
   9225084,
   'First release-signed build, delivered automatically by the desktop app.'
 )
 on conflict (version_code) do nothing;
 
 update app_releases set is_current = false where is_current;
-update app_releases set is_current = true where version_code = 2;
+update app_releases set is_current = true where version_code = 3;
 
 commit;

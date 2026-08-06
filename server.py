@@ -32,6 +32,7 @@ from routers import devices
 from routers import apps
 from routers import schedules
 from routers import releases
+from routers import desktop_releases
 from routers import stripe_routes
 
 # Register routes to the root (/) requiring the API Key
@@ -40,6 +41,11 @@ app.include_router(apps.router, prefix="/api", dependencies=[Depends(get_api_key
 app.include_router(schedules.router, prefix="/api", dependencies=[Depends(get_api_key)])
 app.include_router(releases.router, prefix="/api", dependencies=[Depends(get_api_key)])
 app.include_router(stripe_routes.router, prefix="/api/stripe")
+
+# No get_api_key dependency, deliberately: installed desktop copies check for updates on
+# launch, before any login, and the website's download page has no credentials either.
+# See routers/desktop_releases.py for why that is safe here and nowhere else.
+app.include_router(desktop_releases.router, prefix="/api")
 
 if __name__ == "__main__":
     import uvicorn
