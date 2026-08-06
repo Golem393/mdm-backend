@@ -10,10 +10,14 @@ parent can call directly. A parent who needs an active schedule changed emails s
 who edits the row directly in Supabase. Removing the app is gated behind
 profiles.remove_enabled, which only support can flip.
 
-The one exception is expiry: once `active_until` is in the past, the schedule is spent —
-the phone has already unblocked itself — so it's lazily deleted the next time it's read
-(`_get_schedule`, below), which is what lets a parent set up a fresh one. This isn't a
-client-facing update/delete; it only ever fires from the backend's own read path.
+The one exception is expiry: once the schedule's effective expiry (`_effective_expiry`)
+is in the past, the schedule is spent — the phone has already unblocked itself — so it's
+lazily deleted the next time it's read (`_get_schedule`, below), which is what lets a
+parent set up a fresh one. This isn't a client-facing update/delete; it only ever fires
+from the backend's own read path. For a same-day lock window that expiry is the last
+day's lock end time; for an overnight window it's still midnight at the end of the last
+day, since `active_until` alone can't express "end of lock window" once that window
+crosses into the next calendar day.
 
 Uses the same module-level `supabase` client as the rest of the backend — no separate
 admin client. That means SUPABASE_KEY must be the service-role key, which is already the
@@ -21,8 +25,9 @@ case today: `update_profile` writes `profiles` through this same client from the
 webhook, and that works in production.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -48,8 +53,39 @@ def _require_user(authorization: Optional[str]):
     return user
 
 
+def _effective_expiry(schedule: dict) -> datetime:
+    """The instant the schedule actually stops mattering.
+
+    `active_until` is stored as local midnight at the *end* of the last day (see
+    SkywardDesktop's `endOfLocalDay`) — that's the right boundary for an overnight lock
+    window (e.g. 10pm-6am), which still needs to fire past midnight on its last day. But
+    for a same-day window (e.g. 2pm-6pm) there's no reason to keep the row alive until
+    midnight — it should go once that last day's lock window closes.
+    """
+    active_until = datetime.fromisoformat(schedule["active_until"])
+
+    spans_midnight = (
+        schedule["lock_end_hour"] * 60 + schedule["lock_end_minute"]
+        <= schedule["lock_start_hour"] * 60 + schedule["lock_start_minute"]
+    )
+    if spans_midnight:
+        return active_until
+
+    try:
+        tz = ZoneInfo(schedule["timezone_id"])
+    except Exception:
+        return active_until
+
+    last_day = (active_until.astimezone(tz) - timedelta(days=1)).date()
+    return datetime.combine(
+        last_day,
+        time(schedule["lock_end_hour"], schedule["lock_end_minute"]),
+        tzinfo=tz,
+    )
+
+
 def _is_expired(schedule: dict) -> bool:
-    return datetime.fromisoformat(schedule["active_until"]) <= datetime.now(timezone.utc)
+    return _effective_expiry(schedule) <= datetime.now(timezone.utc)
 
 
 def _get_schedule(user_id: str) -> Optional[dict]:
