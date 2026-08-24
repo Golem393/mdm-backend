@@ -1,4 +1,4 @@
-fastapi
+﻿fastapi
 uvicorn
 httpx
 google-play-scraper
@@ -8,3 +8,5 @@ openai
 stripe>=8.0
 supabase>=2.4
 python-dotenv>=1.0
+requests
+beautifulsoup4

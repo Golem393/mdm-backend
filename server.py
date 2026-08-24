@@ -1,4 +1,4 @@
-import os
+﻿import os
 from fastapi import FastAPI, Depends, HTTPException, Security
 from fastapi.security.api_key import APIKeyHeader
 from dotenv import load_dotenv
@@ -34,6 +34,7 @@ from routers import schedules
 from routers import releases
 from routers import desktop_releases
 from routers import stripe_routes
+from routers import app_search
 
 # Register routes to the root (/) requiring the API Key
 app.include_router(devices.router, prefix="/api", dependencies=[Depends(get_api_key)])
@@ -47,7 +48,11 @@ app.include_router(stripe_routes.router, prefix="/api/stripe")
 # See routers/desktop_releases.py for why that is safe here and nowhere else.
 app.include_router(desktop_releases.router, prefix="/api")
 
+# Public: the website's "Check any app" search box calls this without credentials.
+app.include_router(app_search.router, prefix="/api")
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 3000))
     uvicorn.run("server:app", host="0.0.0.0", port=port, reload=True)
+
