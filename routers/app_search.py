@@ -136,7 +136,7 @@ async def lookup_app_category(package_name: str) -> dict:
         return {"packageName": package_name, "category": "Unknown"}
 
 
-_BLOCKED_CATEGORIES = {"SOCIAL", "ENTERTAINMENT", "VIDEO_PLAYERS_ENTERTAINMENT"}
+_BLOCKED_CATEGORIES = {"SOCIAL", "ENTERTAINMENT", "VIDEO_PLAYERS_ENTERTAINMENT", "BROWSER"}
 
 
 @router.get("/blocked-app-search")
@@ -166,3 +166,4 @@ async def app_search(app_name: str):
     except Exception as e:
         print(f"Error in /blocked-app-search: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch app")
+
