@@ -151,8 +151,7 @@ async def app_search(app_name: str):
 
         category_result = await lookup_app_category(app_id)
         category = category_result.get("category")
-        is_browser = "browser" in str(category_result.get("appName", "")).lower() or app_id in {"com.android.chrome", "org.mozilla.firefox", "com.sec.android.app.sbrowser", "com.opera.browser", "com.brave.browser", "com.microsoft.emmx", "com.duckduckgo.mobile.android"}
-        app_status = "Blocked" if (category in _BLOCKED_CATEGORIES or "GAME" in category or is_browser) else "Allowed"
+        app_status = "Blocked" if (category in _BLOCKED_CATEGORIES or "GAME" in category) else "Allowed"
 
         return {
             "app_id": app_id,
@@ -167,4 +166,3 @@ async def app_search(app_name: str):
     except Exception as e:
         print(f"Error in /blocked-app-search: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch app")
-
